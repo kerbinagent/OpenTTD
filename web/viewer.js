@@ -10,6 +10,8 @@ const dom = Object.fromEntries([
   "thread-select", "mute-thread", "thread-description", "messages", "message-form",
   "message-body", "send-message", "message-feedback", "chat-status", "report-dialog",
   "report-form", "report-reason", "report-feedback", "cancel-report", "world-status", "world-status-detail",
+  "play", "type-text", "expand-view", "native-text-panel", "native-text", "apply-native-text", "cancel-native-text",
+  "native-feedback", "pending-id", "input-check", "input-retry",
 ].map(id => [id, $(id)]));
 
 // One session, one camera, bounded chat state. Credentials never leave memory.
@@ -23,6 +25,12 @@ let frameRevision = 0;
 let frameTimer = null;
 let nextCaptureAt = 0;
 let inspectMode = false;
+let inputMode = "play";
+let activePointer = null;
+let textArmed = null;
+let textComposing = false;
+let pendingInput = null;
+let inputPollTimer = null;
 let threads = [];
 let selectedThread = null;
 let threadRevision = 0;
@@ -41,6 +49,7 @@ let reportMessage = null;
 let pendingMessage = null;
 let blocked = new Set();
 const MAX_MESSAGES = 250;
+const nativeUnavailableText = "Native play is unavailable for this session. View controls and chat remain available.";
 
 class APIError extends Error {
   constructor(status) { super("Request unavailable"); this.status = status; }
@@ -74,6 +83,23 @@ function companyLabel(company, name) {
 }
 function requestID() { return crypto.randomUUID(); }
 
+function nativeInputAvailable(gesture) {
+  return session?.me.mode === "visual" && session.capabilities?.mode === "visual"
+    && Array.isArray(session.capabilities.tools) && session.capabilities.tools.some(tool =>
+      tool?.name === "ui.apply" && tool.target === "image" && Array.isArray(tool.gestures) && tool.gestures.includes(gesture));
+}
+
+function cameraHeld() { return !!(activePointer || textArmed || pendingInput); }
+function autoViewAllowed() { return session && !frameBusy && !cameraHeld() && inputMode !== "text"; }
+function scheduleView(delay = 1000) {
+  clearTimeout(frameTimer);
+  if (dom["live-view"].checked && autoViewAllowed()) frameTimer = setTimeout(() => {
+    if (!document.hidden && autoViewAllowed()) void runView();
+  }, delay);
+}
+
+function inputFeedback(text) { dom["native-feedback"].textContent = text; }
+
 function showWorldStatus(value = null) {
   const description = value ? pauseDescription(value) : { label: session ? "World status unavailable" : "World status offline", detail: session ? "Checking the current state again when the connection returns." : "Connect to see the shared pause state." };
   status(dom["world-status"], description.label, !!value && !value.pause.paused);
@@ -83,17 +109,36 @@ function showWorldStatus(value = null) {
 
 function setViewControls() {
   const canView = !!session;
-  const canControl = canView && !!frame && !frameBusy;
+  const canControl = canView && !!frame && !frameBusy && !cameraHeld();
   document.querySelectorAll("[data-pan],[data-zoom]").forEach(button => { button.disabled = !canControl; });
-  dom.inspect.disabled = !canControl;
+  dom.inspect.disabled = !canView || frameBusy || !!pendingInput;
+  dom.play.disabled = !nativeInputAvailable("click") || frameBusy || !!pendingInput;
+  dom["type-text"].disabled = !nativeInputAvailable("text") || frameBusy || !!pendingInput;
   dom["open-window"].disabled = !canControl;
   dom["close-windows"].disabled = !canControl;
   dom["report-window"].disabled = !canControl;
-  dom["refresh-view"].disabled = !canView || frameBusy;
-  dom["live-view"].disabled = !canView;
+  dom["refresh-view"].disabled = !canView || frameBusy || cameraHeld();
+  dom["live-view"].disabled = !canView || cameraHeld() || inputMode === "text";
   dom["capture-indicator"].hidden = !frameBusy;
   dom.inspect.setAttribute("aria-pressed", String(inspectMode));
+  dom.play.setAttribute("aria-pressed", String(inputMode === "play"));
+  dom["type-text"].setAttribute("aria-pressed", String(inputMode === "text"));
+  dom["native-text-panel"].hidden = inputMode !== "text";
+  dom["apply-native-text"].disabled = !nativeInputAvailable("text") || frameBusy || !!pendingInput || textComposing || !!activePointer;
+  dom["native-text"].disabled = !!pendingInput;
+  dom["cancel-native-text"].disabled = frameBusy || !!pendingInput;
+  dom["input-check"].hidden = !pendingInput;
+  dom["input-retry"].hidden = !pendingInput;
+  dom["input-check"].disabled = !pendingInput || pendingInput.busy;
+  dom["input-retry"].disabled = !pendingInput || pendingInput.busy;
+  dom["pending-id"].textContent = pendingInput ? `Request ${pendingInput.id} · ${pendingInput.status}. Reloading or disconnecting does not cancel it.` : "";
   dom["game-stage"].classList.toggle("inspecting", inspectMode && canControl);
+  dom["game-stage"].classList.toggle("native-input", nativeInputAvailable("click"));
+  dom["game-stage"].classList.toggle("dragging", !!activePointer);
+  if (session && !nativeInputAvailable("click") && !pendingInput) inputFeedback(nativeUnavailableText);
+  else if (nativeInputAvailable("click") && dom["native-feedback"].textContent === nativeUnavailableText) {
+    inputFeedback(inputMode === "text" ? "Write the replacement first, then Apply text to field and click the native editbox. Native OK is a separate click." : "Click or left-drag the game image. Right-click cancels a native tool; Ctrl provides native alternatives.");
+  }
 }
 
 function clearFrame() {
@@ -106,6 +151,10 @@ function clearFrame() {
 }
 
 function disconnect() {
+  cancelUnsentInput();
+  pendingInput?.abort?.abort();
+  clearTimeout(inputPollTimer);
+  pendingInput = null;
   generation++;
   session = null;
   frameRevision++;
@@ -118,6 +167,9 @@ function disconnect() {
   cursor = ""; selectedThread = null; threads = []; messages.clear(); historyCursor = null;
   worldStatus = null;
   pendingMessage = null; blocked.clear(); reportMessage = null; inspectMode = false;
+  inputMode = "play"; textComposing = false;
+  dom["native-text"].value = "";
+  inputFeedback("");
   clearFrame();
   dom["report-dialog"].close();
   dom.token.value = "";
@@ -165,7 +217,7 @@ dom["connect-form"].addEventListener("submit", async event => {
     void refreshParticipants(epoch);
     void refreshThreads(epoch);
     void request("/v1/capabilities").then(capabilities => {
-      if (current(epoch)) session.capabilities = capabilities;
+      if (current(epoch)) { session.capabilities = capabilities; setViewControls(); }
     }).catch(() => { /* View and chat retain independent availability. */ });
     void connectEvents(epoch);
     void runView();
@@ -215,13 +267,16 @@ async function capture(epoch, revision, signal) {
     if (decoded.naturalWidth !== image.width || decoded.naturalHeight !== image.height) throw new APIError(502);
     const previousURL = frameURL;
     dom["game-image"].src = url;
+    await dom["game-image"].decode();
+    if (!current(epoch) || revision !== frameRevision || signal.aborted || dom["game-image"].currentSrc !== url) return;
+    if (dom["game-image"].naturalWidth !== image.width || dom["game-image"].naturalHeight !== image.height) throw new APIError(502);
     frameURL = url;
     frame = { id: image.image_id, width: image.width, height: image.height };
     dom["game-image"].hidden = false;
     dom["view-empty"].hidden = true;
     if (previousURL) URL.revokeObjectURL(previousURL);
     status(dom["view-status"], `Live · ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`, true);
-    dom["view-note"].textContent = "Read-only viewer · One shared camera per run; another tab can move it.";
+    dom["view-note"].textContent = "One shared camera per run; another tab can invalidate this image. Native input may expire while the image is held.";
   } finally {
     if (frameURL !== url) URL.revokeObjectURL(url);
   }
@@ -229,7 +284,7 @@ async function capture(epoch, revision, signal) {
 
 // The camera has one in-flight operation, including capture, PNG fetch and decode.
 async function runView(control = null) {
-  if (!session || frameBusy || (control && !frame)) return;
+  if (!session || frameBusy || cameraHeld() || (control && !frame)) return false;
   clearTimeout(frameTimer);
   const epoch = generation, revision = ++frameRevision;
   frameAbort?.abort();
@@ -244,6 +299,7 @@ async function runView(control = null) {
       method: "POST", body: { image_id: frame.id, ...control }, signal: controller.signal,
     });
     if (current(epoch)) await capture(epoch, revision, controller.signal);
+    return !!frame && current(epoch) && revision === frameRevision;
   } catch (error) {
     if (current(epoch)) {
       status(dom["view-status"], stopped(error) ? "View timed out" : "View unavailable");
@@ -252,20 +308,19 @@ async function runView(control = null) {
       // A new capture or another tab can invalidate the old targeting token.
       frame = null;
     }
+    return false;
   } finally {
     clearTimeout(timeout);
     if (current(epoch) && revision === frameRevision) {
       frameBusy = false;
       setViewControls();
-      if (dom["live-view"].checked) frameTimer = setTimeout(() => {
-        if (!document.hidden) void runView();
-      }, retryDelay);
+      scheduleView(retryDelay);
     }
   }
 }
 
 function control(action, parameters = {}) {
-  if (frameBusy || !frame) return;
+  if (frameBusy || cameraHeld() || !frame) return;
   if (action === "pan") parameters = { dx: Math.max(-frame.width, Math.min(frame.width, parameters.dx)), dy: Math.max(-frame.height, Math.min(frame.height, parameters.dy)) };
   void runView({ action, ...parameters });
 }
@@ -279,16 +334,9 @@ dom["live-view"].addEventListener("change", () => {
   clearTimeout(frameTimer);
   if (dom["live-view"].checked) void runView();
 });
-dom.inspect.addEventListener("click", () => { inspectMode = !inspectMode; setViewControls(); });
-dom["game-image"].addEventListener("click", event => {
-  if (!inspectMode || frameBusy || !frame) return;
-  // img uses auto dimensions with max-width/max-height, so its rectangle excludes letterboxing.
-  const bounds = dom["game-image"].getBoundingClientRect();
-  const x = Math.floor((event.clientX - bounds.left) * frame.width / bounds.width);
-  const y = Math.floor((event.clientY - bounds.top) * frame.height / bounds.height);
-  if (x < 0 || y < 0 || x >= frame.width || y >= frame.height) return;
-  control("inspect", { x, y });
-});
+dom.inspect.addEventListener("click", () => setInputMode("inspect"));
+dom.play.addEventListener("click", () => setInputMode("play"));
+dom["type-text"].addEventListener("click", () => setInputMode("text"));
 dom["game-stage"].addEventListener("keydown", event => {
   const keys = { ArrowUp: [0, -160], ArrowDown: [0, 160], ArrowLeft: [-240, 0], ArrowRight: [240, 0] };
   if (keys[event.key]) { event.preventDefault(); const [dx, dy] = keys[event.key]; control("pan", { dx, dy }); }
@@ -301,8 +349,225 @@ dom["open-window"].addEventListener("click", () => {
 });
 dom["close-windows"].addEventListener("click", () => control("close_windows"));
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && session && dom["live-view"].checked) void runView();
+  if (document.hidden) cancelUnsentInput("Input canceled while the page was hidden.");
+  else {
+    if (pendingInput && ["accepted", "queued"].includes(pendingInput.status)) void checkPendingInput(pendingInput);
+    if (dom["live-view"].checked && autoViewAllowed()) void runView();
+  }
 });
+
+// The image retains auto dimensions: its DOM rectangle is the painted PNG,
+// excluding the stage's letterboxing. CSS pixels map directly to native pixels.
+function imagePin() {
+  const image = dom["game-image"];
+  if (!frame || frameBusy || image.hidden || !image.complete || image.currentSrc !== frameURL
+      || image.naturalWidth !== frame.width || image.naturalHeight !== frame.height) return null;
+  const { left, top, width, height } = image.getBoundingClientRect();
+  if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+  return { frame, url: frameURL, revision: frameRevision, epoch: generation, rect: { left, top, width, height }, world: worldStatus };
+}
+
+function samePin(pin) {
+  const now = imagePin();
+  return now && pin.epoch === generation && pin.frame === now.frame && pin.url === now.url && pin.revision === now.revision
+    && Object.keys(pin.rect).every(key => pin.rect[key] === now.rect[key])
+    && ((!pin.world && !now.world) || sameWorldFence(pin.world, now.world));
+}
+
+function imagePoint(pin, clientX, clientY) {
+  const { left, top, width, height } = pin.rect;
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY) || clientX < left || clientY < top || clientX >= left + width || clientY >= top + height) return null;
+  const x = Math.floor((clientX - left) * pin.frame.width / width), y = Math.floor((clientY - top) * pin.frame.height / height);
+  return x >= 0 && x < pin.frame.width && y >= 0 && y < pin.frame.height ? { x, y } : null;
+}
+
+function cancelUnsentInput(message = "") {
+  const pointer = activePointer;
+  const owned = !!(pointer || textArmed);
+  activePointer = null; textArmed = null;
+  if (pointer) { try { dom["game-image"].releasePointerCapture(pointer.id); } catch { /* Capture was already lost. */ } }
+  if (message && owned) inputFeedback(message);
+  setViewControls();
+  scheduleView();
+}
+
+function setInputMode(mode) {
+  if (frameBusy || pendingInput || (mode !== "inspect" && !nativeInputAvailable(mode === "text" ? "text" : "click"))) return;
+  cancelUnsentInput();
+  inputMode = mode; inspectMode = mode === "inspect";
+  inputFeedback(mode === "text" ? "Write the replacement first, then Apply text to field and click the native editbox. Native OK is a separate click." : "Click or left-drag the game image. Right-click cancels a native tool; Ctrl provides native alternatives.");
+  setViewControls(); scheduleView();
+  if (mode === "text") dom["native-text"].focus();
+}
+
+function unsupportedModifiers(event) { return event.shiftKey || event.altKey || event.metaKey; }
+function pointerModifiersMatch(event, pointer) { return !unsupportedModifiers(event) && !!event.ctrlKey === pointer.ctrl; }
+
+dom["game-image"].addEventListener("pointerdown", event => {
+  if (activePointer || event.isPrimary === false) { cancelUnsentInput("Input canceled: use one pointer at a time."); return; }
+  if (!session || frameBusy || pendingInput || ![0, 2].includes(event.button)) return;
+  if (unsupportedModifiers(event) || (inputMode === "text" && event.ctrlKey)) { inputFeedback("Shift, Alt and Meta are unsupported; text targeting also requires Ctrl released."); return; }
+  const gesture = inputMode === "text" ? "text" : "click";
+  if (inputMode !== "inspect" && !nativeInputAvailable(gesture)) return;
+  if (inputMode === "text" && (!textArmed || textComposing || event.button !== 0)) { inputFeedback("Compose text, then choose Apply text to field first."); return; }
+  const pin = imagePin();
+  if (!pin || (textArmed && (!samePin(textArmed) || dom["native-text"].value !== textArmed.text))) { cancelUnsentInput("Image changed. Refresh and select the field again."); return; }
+  const point = imagePoint(pin, event.clientX, event.clientY);
+  if (!point || (inputMode === "inspect" && event.button !== 0)) return;
+  clearTimeout(frameTimer);
+  activePointer = { pin, point, id: event.pointerId, button: event.button, ctrl: !!event.ctrlKey, mode: inputMode,
+    startX: event.clientX, startY: event.clientY, moved: false, text: textArmed?.text };
+  try { dom["game-image"].setPointerCapture(event.pointerId); } catch { cancelUnsentInput("Pointer capture unavailable."); return; }
+  event.preventDefault(); dom["game-stage"].focus({ preventScroll: true }); setViewControls();
+});
+
+dom["game-image"].addEventListener("pointermove", event => {
+  const pointer = activePointer;
+  if (!pointer || pointer.id !== event.pointerId) return;
+  if (!samePin(pointer.pin) || !pointerModifiersMatch(event, pointer) || event.buttons !== (pointer.button === 0 ? 1 : 2)) { cancelUnsentInput("Input canceled because the image, buttons or modifiers changed."); return; }
+  if (Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) >= 4) pointer.moved = true;
+});
+
+dom["game-image"].addEventListener("pointerup", event => {
+  const pointer = activePointer;
+  if (!pointer || pointer.id !== event.pointerId) return;
+  const point = imagePoint(pointer.pin, event.clientX, event.clientY);
+  if (Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) >= 4) pointer.moved = true;
+  if (!samePin(pointer.pin) || !point || !pointerModifiersMatch(event, pointer) || event.button !== pointer.button
+      || (pointer.mode === "text" && (textComposing || !textArmed || dom["native-text"].value !== pointer.text))
+      || event.buttons !== 0 || (pointer.moved && (pointer.button === 2 || pointer.mode !== "play"))) {
+    cancelUnsentInput("Input canceled. Release inside the unchanged image with the same modifiers."); return;
+  }
+  activePointer = null;
+  try { dom["game-image"].releasePointerCapture(pointer.id); } catch { /* Already released. */ }
+  event.preventDefault();
+  if (pointer.mode === "inspect") { setViewControls(); control("inspect", point); return; }
+  const parameters = { image_id: pointer.pin.frame.id, gesture: pointer.mode === "text" ? "text" : pointer.moved ? "drag" : "click", ...pointer.point };
+  if (pointer.mode === "text") parameters.text = pointer.text;
+  else {
+    parameters.button = pointer.button === 2 ? "right" : "left"; parameters.ctrl = pointer.ctrl;
+    if (pointer.moved) { parameters.end_x = point.x; parameters.end_y = point.y; }
+  }
+  textArmed = null;
+  commitNativeInput(parameters);
+});
+for (const type of ["pointercancel", "lostpointercapture"]) dom["game-image"].addEventListener(type, event => {
+  if (activePointer?.id === event.pointerId) cancelUnsentInput("Pointer canceled; no input sent.");
+});
+dom["game-image"].addEventListener("click", event => event.preventDefault()); // Pointerup owns the one request.
+dom["game-image"].addEventListener("contextmenu", event => { if (nativeInputAvailable("click")) event.preventDefault(); });
+for (const type of ["keydown", "keyup"]) document.addEventListener(type, event => {
+  if (activePointer && !pointerModifiersMatch(event, activePointer)) cancelUnsentInput("Input canceled because modifiers changed.");
+});
+for (const type of ["blur", "resize"]) window.addEventListener(type, () => cancelUnsentInput("Input target canceled because the window changed."));
+dom["expand-view"].addEventListener("click", () => {
+  cancelUnsentInput();
+  const expanded = $("workspace").classList.toggle("expanded");
+  dom["expand-view"].setAttribute("aria-pressed", String(expanded));
+});
+
+function validNativeText(text) {
+  return !/[\uD800-\uDFFF]/u.test(text) && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029\ue000-\ue2ff]/u.test(text)
+    && new TextEncoder().encode(text).length <= 4096;
+}
+dom["native-text"].addEventListener("compositionstart", () => { textComposing = true; cancelUnsentInput(); });
+dom["native-text"].addEventListener("compositionend", () => { textComposing = false; setViewControls(); });
+dom["native-text"].addEventListener("input", () => {
+  if (activePointer?.mode === "text") cancelUnsentInput("Text changed; apply the stable replacement again.");
+  textArmed = null; setViewControls();
+});
+dom["cancel-native-text"].addEventListener("click", () => setInputMode("play"));
+dom["apply-native-text"].addEventListener("click", async () => {
+  if (!nativeInputAvailable("text") || frameBusy || pendingInput || activePointer || textComposing || inputMode !== "text") return;
+  const draft = dom["native-text"].value, epoch = generation;
+  if (!validNativeText(draft)) { inputFeedback("Use at most 4,096 UTF-8 bytes without control characters; text is never shortened."); return; }
+  textArmed = null;
+  if (!await runView() || !current(epoch) || inputMode !== "text" || textComposing || dom["native-text"].value !== draft) return;
+  const pin = imagePin();
+  if (!pin) { inputFeedback("Image is not ready. Apply text to field again."); return; }
+  textArmed = { ...pin, text: draft };
+  inputFeedback("Click the visible native editbox to apply this text. Native OK remains a separate click.");
+  clearTimeout(frameTimer); setViewControls();
+});
+
+function pendingCurrent(operation) { return pendingInput === operation && current(operation.epoch) && session.token === operation.token; }
+function showPendingFailure(operation) {
+  if (!pendingCurrent(operation)) return;
+  operation.status = "uncertain";
+  inputFeedback("Outcome unconfirmed. Check status or retry the same request. Camera input is held; chat remains available.");
+}
+function acceptInputReceipt(operation, receipt) {
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt) || Object.keys(receipt).length !== 2
+      || receipt.request_id !== operation.id || !["accepted", "queued", "completed", "rejected", "uncertain", "resolved_rolled_back"].includes(receipt.status)) throw new TypeError("Invalid input receipt");
+  operation.status = receipt.status;
+}
+function finishInputAttempt(operation) {
+  if (!pendingCurrent(operation)) return;
+  operation.busy = false;
+  if (["completed", "rejected", "resolved_rolled_back"].includes(operation.status)) {
+    pendingInput = null;
+    inputFeedback(operation.stale ? "Image expired before input was accepted. A new image is loading; choose the action again." : operation.status === "completed" ? "Input completed. Check the new image for its result." : operation.status === "rejected" ? "Input rejected. Check the new image and choose your next action." : "Input was rolled back. Check the new image before acting again.");
+    if (operation.gesture === "text" && operation.status === "completed") { inputMode = "play"; inspectMode = false; }
+    setViewControls(); void runView();
+  } else {
+    if (["accepted", "queued"].includes(operation.status)) {
+      inputFeedback("Input accepted; waiting for its result. Chat remains available.");
+      if (!document.hidden) inputPollTimer = setTimeout(() => void checkPendingInput(operation), 1000);
+    } else showPendingFailure(operation);
+    setViewControls();
+  }
+}
+async function sendPendingInput(operation) {
+  if (!pendingCurrent(operation) || operation.busy) return;
+  clearTimeout(inputPollTimer);
+  operation.busy = true; operation.status = "sending";
+  operation.attempts++;
+  operation.abort = new AbortController();
+  const timeout = setTimeout(() => operation.abort.abort(), 15000);
+  inputFeedback("Sending input…"); setViewControls();
+  try {
+    const response = await fetch("/v1/actions", { method: "POST", body: operation.body, signal: operation.abort.signal,
+      credentials: "omit", cache: "no-store", redirect: "error",
+      headers: { Authorization: `Bearer ${operation.token}`, Accept: "application/json", "Content-Type": "application/json" } });
+    if (!response.ok) {
+      if (response.status === 404 && operation.attempts === 1) {
+        const failure = await response.json();
+        if (failure && Object.keys(failure).length === 1 && failure.error && typeof failure.error === "object"
+            && Object.keys(failure.error).length === 2 && failure.error.code === "image_unavailable" && typeof failure.error.message === "string") {
+          if (pendingCurrent(operation)) { operation.status = "rejected"; operation.stale = true; }
+          return;
+        }
+      }
+      throw new APIError(response.status);
+    }
+    const receipt = await response.json();
+    if (pendingCurrent(operation)) acceptInputReceipt(operation, receipt);
+  } catch { showPendingFailure(operation); }
+  finally { clearTimeout(timeout); finishInputAttempt(operation); }
+}
+function commitNativeInput(parameters) {
+  if (pendingInput || frameBusy || !session || !nativeInputAvailable(parameters.gesture)) { cancelUnsentInput(); inputFeedback("Native input is unavailable."); return; }
+  const id = requestID();
+  const operation = { id, body: JSON.stringify({ request_id: id, action: { name: "ui.apply", parameters }, preconditions: {} }),
+    gesture: parameters.gesture, epoch: generation, token: session.token, status: "sending", busy: false, attempts: 0 };
+  pendingInput = operation; frame = null;
+  clearTimeout(frameTimer);
+  void sendPendingInput(operation);
+}
+async function checkPendingInput(operation = pendingInput) {
+  if (!operation || !pendingCurrent(operation) || operation.busy) return;
+  clearTimeout(inputPollTimer); operation.busy = true;
+  operation.abort = new AbortController();
+  const timeout = setTimeout(() => operation.abort.abort(), 15000);
+  setViewControls();
+  try {
+    const receipt = await request(`/v1/actions/${encodeURIComponent(operation.id)}`, { signal: operation.abort.signal, token: operation.token });
+    if (pendingCurrent(operation)) acceptInputReceipt(operation, receipt);
+  } catch { showPendingFailure(operation); }
+  finally { clearTimeout(timeout); finishInputAttempt(operation); }
+}
+dom["input-check"].addEventListener("click", () => void checkPendingInput());
+dom["input-retry"].addEventListener("click", () => { if (pendingInput) void sendPendingInput(pendingInput); });
 
 async function refreshParticipants(epoch) {
   try {

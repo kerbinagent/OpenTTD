@@ -1,10 +1,10 @@
 # Run one local mixed world
 
 `mixed_world.py` starts an integration-enabled native server, one backend, and
-two genuine native rendering workers. It provides a local browser viewer/chat
-session, a text agent company, a visual agent company, and an open company for
-a matching native human client. Browser construction is outside this viewer
-slice; external agents use the authenticated API.
+two genuine native rendering workers. It provides human, text-agent and visual-agent
+companies. The browser supports chat and play through genuine native PNGs when
+the session's visual-mode capabilities advertise `ui.apply`. A matching native
+human client is also available; external agents use the authenticated API.
 
 Build the engine as described in [the integration guide](../docs/agent_integration.md).
 Install OpenGFX in a directory containing its `.obg` and graphics files. Use
@@ -38,7 +38,7 @@ browser URL and paste a token from one of these private files:
 
 | File under the state directory | Company | Access |
 | --- | --- | --- |
-| `credentials/human.token` | 1 (ID 0) | Human browser view and chat |
+| `credentials/human.token` | 1 (ID 0) | Native PNG browser play and chat when `ui.apply` is advertised |
 | `credentials/text-agent.token` | 2 (ID 1) | Structured observation and normal agent actions |
 | `credentials/visual-agent.token` | 3 (ID 2) | Genuine image perception and shared typed gameplay actions; optional native UI tools |
 
@@ -86,6 +86,39 @@ without automatic restarts. An engine or backend failure stops the owned group.
 Inspect `logs/engine.log`, `logs/backend.log`, `logs/r0.log`, and `logs/r2.log`.
 Startup occurs on private local listeners before readiness is printed; do not
 share credentials until **World ready** appears.
+
+## Play in the browser
+
+Open the printed browser URL and paste your credential into the connection form,
+never into the URL. Play controls require a visual-mode session advertising the
+corresponding `ui.apply` gesture; the identity's human or agent kind does not
+grant this capability. The printed matching native-client command is an
+alternative way to play.
+
+1. Choose **Expand view** for more room, then **Play**. Click native buttons or
+   left-drag inside the game image. Right-click cancels a native tool. Hold Ctrl
+   through a click or drag for the native alternative; release the mouse button
+   inside the image before changing modifiers.
+2. For a native text field, choose **Text** and compose the full replacement
+   first. Choose **Apply text to field**, wait for its fresh capture, then click
+   the visible native editbox with Ctrl released. Wait for the updated PNG and
+   click native **OK** separately. Text replacement does not submit the native
+   dialog automatically.
+3. Use the arrow and +/− buttons, or focus the image and use arrow and +/− keys,
+   to move the camera. Generic keyboard and mouse-wheel input are not forwarded
+   to the game. **Inspect** remains a separate mode for examining a location
+   without sending a native gameplay click.
+
+Each completed input refreshes the PNG. **Input completed** is workflow status;
+inspect the new image for the native success or error before acting again. It
+does not by itself establish that construction succeeded.
+
+If the viewer reports that the image expired before input was accepted, wait
+for the fresh image and deliberately choose the next input. For an unconfirmed
+outcome, use **Check status** or **Retry same request**, which retains the exact
+original request. Do not repeat the gesture as a new request. Reloading or
+disconnecting does not cancel admitted input; chat remains available while the
+viewer holds camera input pending its outcome.
 
 ## Export the native catalog
 

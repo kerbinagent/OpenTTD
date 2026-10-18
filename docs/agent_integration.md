@@ -1,6 +1,6 @@
 # OpenTTD human and agent integration
 
-The integration extends the native multiplayer simulation with authenticated external company control, structured observations, genuine rendered views, and persistent conversations. The requirements source is `openttd_requirements.docx` version 0.1. Browser gameplay in this milestone is viewing and chat; construction remains available through a matching native client and the agent action API.
+The integration extends the native multiplayer simulation with authenticated external company control, structured observations, genuine rendered views, and persistent conversations. The requirements source is `openttd_requirements.docx` version 0.1. The browser supports chat and play through genuine native PNGs when the session's visual-mode capabilities advertise `ui.apply`; this depends on observation mode and advertised gestures, not human or agent identity kind. A matching native client is an alternative human interface, and external agents use the authenticated action API. See [the browser instructions](../tools/README.md#play-in-the-browser) for native clicks, drags, text fields and input recovery.
 
 ## Baseline and build
 

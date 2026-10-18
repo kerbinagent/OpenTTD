@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="description" content="Watch your OpenTTD world and talk with its human and agent players.">
+  <meta name="description" content="Play your OpenTTD company through its native game view and talk with other players.">
   <title>OpenTTD · World viewer</title>
   <link rel="stylesheet" href="/viewer.css">
   <script type="module" src="/viewer.js"></script>
@@ -18,7 +18,7 @@
 
   <section id="connect-panel" class="connect-panel" aria-labelledby="connect-title">
     <div><p class="eyebrow">LOCAL WORLD SESSION</p><h1 id="connect-title">Connect to your world.</h1>
-      <p>Watch the live game and talk with human and agent players. Use the credential supplied by your world operator.</p></div>
+      <p>Play through the native game view and talk with human and agent players. Use the credential supplied by your world operator.</p></div>
     <form id="connect-form">
       <label for="token">Session token</label>
       <div class="input-row"><input id="token" type="password" autocomplete="off" spellcheck="false" required placeholder="Paste your session token"><button id="connect" type="submit">Connect</button></div>
@@ -38,7 +38,7 @@
     <section class="world-panel panel" aria-labelledby="world-heading">
       <div class="panel-heading world-heading"><div><p class="eyebrow">NATIVE GAME VIEW</p><h2 id="world-heading">Your company’s window</h2></div><span id="view-status" class="status-label" role="status">Waiting for session</span></div>
       <div class="world-state" role="status"><strong id="world-status">World status offline</strong><span id="world-status-detail">Connect to see the shared pause state.</span></div>
-      <div id="game-stage" class="game-stage" tabindex="0" role="group" aria-label="Game image. Use arrow keys to pan, plus and minus to zoom, and Enter to inspect the center when Inspect is selected.">
+      <div id="game-stage" class="game-stage" tabindex="0" role="group" aria-label="Native game image. Click or left-drag to play, right-click to cancel a tool. Ctrl provides native alternatives. Arrow keys pan; plus and minus zoom.">
         <img id="game-image" alt="Live OpenTTD game view for your company" draggable="false" hidden>
         <div id="view-empty" class="view-empty"><span class="rail-symbol" aria-hidden="true">╪</span><h3>The world appears here</h3><p>Connect to load a genuine game image.<br>Chat is available even when the view is offline.</p></div>
         <span id="capture-indicator" class="capture-indicator" hidden>Updating view…</span>
@@ -46,12 +46,19 @@
       <div class="view-toolbar" aria-label="Camera controls">
         <div class="pan-controls"><button type="button" data-pan="0,-160" aria-label="Pan up" title="Pan up (↑)">↑</button><button type="button" data-pan="-240,0" aria-label="Pan left" title="Pan left (←)">←</button><button type="button" data-pan="240,0" aria-label="Pan right" title="Pan right (→)">→</button><button type="button" data-pan="0,160" aria-label="Pan down" title="Pan down (↓)">↓</button></div>
         <div class="button-group"><button type="button" data-zoom="-1" aria-label="Zoom in" title="Zoom in (+)">+</button><button type="button" data-zoom="1" aria-label="Zoom out" title="Zoom out (−)">−</button></div>
-        <button type="button" id="inspect" aria-pressed="false" title="Inspect a location in the game image">Inspect</button>
+        <div class="button-group"><button type="button" id="play" aria-pressed="true">Play</button><button type="button" id="inspect" aria-pressed="false" title="Inspect a location without clicking native game controls">Inspect</button><button type="button" id="type-text" aria-pressed="false">Text</button></div>
+        <button type="button" id="expand-view" class="quiet" aria-pressed="false">Expand view</button>
         <button type="button" id="refresh-view" class="quiet">Refresh</button>
         <label class="live-toggle"><input type="checkbox" id="live-view" checked> Live</label>
       </div>
+      <div id="native-text-panel" class="native-text-panel" hidden>
+        <label for="native-text">Native field replacement</label><textarea id="native-text" rows="2" spellcheck="false" placeholder="Write the full replacement; empty text clears the field."></textarea>
+        <div class="native-actions"><button type="button" id="apply-native-text">Apply text to field</button><button type="button" id="cancel-native-text" class="quiet">Back to Play</button></div>
+        <p class="helper">Compose first, choose Apply text to field, then click the native editbox. Click native OK separately after the image updates.</p>
+      </div>
+      <div class="native-feedback"><p id="native-feedback" role="status">Click or left-drag to play. Right-click cancels a native tool; Ctrl provides native alternatives.</p><p id="pending-id" class="helper"></p><div class="native-actions"><button type="button" id="input-check" class="quiet" hidden>Check status</button><button type="button" id="input-retry" class="quiet" hidden>Retry same request</button></div></div>
       <div class="report-toolbar"><label for="report-window">Game reports</label><select id="report-window"><option value="finances">Company finances</option><option value="company">Company information</option><option value="vehicles:rail">Trains</option><option value="vehicles:road">Road vehicles</option><option value="vehicles:ship">Ships</option><option value="vehicles:air">Aircraft</option><option value="stations">Stations</option></select><button type="button" id="open-window" class="quiet">Open</button><button type="button" id="close-windows" class="quiet">Close reports</button></div>
-      <p id="view-note" class="helper view-note">Read-only viewer · One shared camera per run; another tab can move it.</p>
+      <p id="view-note" class="helper view-note">One shared camera per run; another tab can invalidate this image. Refresh after a stale input.</p>
     </section>
 
     <section class="chat-panel panel" aria-labelledby="chat-heading">

@@ -335,6 +335,13 @@ a {
 .game-stage.inspecting {
   cursor:crosshair;
 }
+.game-stage.native-input img {
+  touch-action:none;
+}
+.game-stage.dragging {
+  outline:2px solid var(--amber);
+  outline-offset:-2px;
+}
 .game-stage img {
   display:block;
   max-width:100%;
@@ -417,6 +424,42 @@ a {
   align-items:center;
   gap:7px;
   flex-wrap:wrap;
+}
+.native-text-panel,.native-feedback {
+  border-top:1px solid var(--line);
+  padding:10px 12px;
+  font-size:11px;
+}
+.native-text-panel label {
+  display:block;
+  margin-bottom:5px;
+}
+.native-text-panel textarea {
+  display:block;
+  width:100%;
+}
+.native-actions {
+  display:flex;
+  flex-wrap:wrap;
+  gap:7px;
+  margin-top:7px;
+}
+.native-actions button {
+  font-size:11px;
+}
+#pending-id {
+  overflow-wrap:anywhere;
+}
+.workspace.expanded .world-panel {
+  grid-column:1/-1;
+  grid-row:1;
+}
+.workspace.expanded .game-stage {
+  height:75vh;
+}
+.workspace.expanded .chat-panel {
+  grid-column:2/-1;
+  grid-row:2;
 }
 .report-toolbar label {
   font-size:10px;
