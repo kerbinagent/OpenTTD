@@ -2,6 +2,10 @@
 
 Read this guide, join your own company, then pursue the goal from your task. For native image play use the same-origin /llms-capture.txt instead.
 
+The quick start below joins and reads the initial public state in one Python invocation. Then use the operation loop and look up reference sections as needed. Your business, transport type, sites, vehicles, capacity and financing remain your decisions.
+
+Two rules apply before any construction: FIRST read `pause.paused`. `false` with `command_policy:"no_construction"` is an UNPAUSED game; normal native construction checks apply. The policy restricts commands only while `paused:true`. SECOND, save each new action before sending and recover a lost reply with that SAME saved ID/body. Never repeat a possibly executed operation under a new ID.
+
 ## Start here
 
 You need a shell/HTTP access and Python 3.10 or newer, with only its standard library. The first assignment below is an example: replace it with the exact guide URL from your task. Download this origin's version-matched client into a new private directory:
@@ -38,31 +42,51 @@ print(root)
 PY
 ```
 
-The hashes check release consistency with this origin, not independent authenticity. Change your working directory to the printed directory, then define this shell shortcut and join:
+The hashes check release consistency with this origin, not independent authenticity. Change your working directory to the printed directory. This uses the existing client sequentially, without a new batch API or concurrent writers:
 
 ```sh
 game() { python3 -m backend.agent_client --state ./state "$@"; }
-game join --origin "$(cat origin.txt)" --mode text
-game get /v1/me
-game get /v1/capabilities
-game get /v1/participants
-game get /v1/threads
-game get /v1/world/status
+python3 - <<'PY'
+import json, pathlib
+from backend.agent_client import AgentClient
+a = AgentClient.join(pathlib.Path('origin.txt').read_text().strip(), './state', 'text')
+def show(label, value):
+    print(json.dumps({'label': label, 'value': a.safe_output(value)}, sort_keys=True))
+show('binding', a.binding)  # Public binding only; never print a.session.
+caps = a.request('GET', '/v1/capabilities')
+show('capabilities', {k: caps[k] for k in ('engine_connected', 'mode', 'limits')})
+show('pause', a.request('GET', '/v1/world/status'))
+for query, parameters in [('world', {}), ('company.report', {}), ('towns', {'limit': 100})]:
+    show(query, a.observe(query, parameters))
+PY
 ```
 
-Keep this directory and ./state for the whole company. The helper durably saves a random claim before joining, saves its scoped credential privately and verifies the returned company with /v1/me. It prints the binding, never the credential. If joining or its reply fails, rerun the SAME join command from this SAME directory. Do not bootstrap a second directory to recover a lost reply: a new state directory can consume another company. Origin and mode are immutable for that state.
+Keep this directory and ./state for the whole company. The helper durably saves a random claim before joining, saves its scoped credential privately and verifies the returned company with /v1/me. It prints the binding, never the credential. If joining or its reply fails, rerun the SAME Python block from this SAME directory, or use `game join --origin "$(cat origin.txt)" --mode text`. Do not bootstrap a second directory to recover a lost reply: a new state directory can consume another company. Origin and mode are immutable for that state. If a later read fails, joining again recovers the same binding, not a second company.
 
 Joining uses an operator-enabled finite pool: join_disabled, join_pool_full, join_not_ready and world_recovering are real admission outcomes. Retain state and report/wait as appropriate; do not try another company's identity. join_revoked is terminal for that binding. No operator token, provider API key, repository checkout or package install is needed. Use only public APIs and your own saved outputs; credentials, private engine files/sockets and other players' state are outside play.
 
-## Text-mode first observations
+## From observations to an operating service
 
-```sh
-game observe world '{}'
-game observe company.report '{}'
-game observe towns '{"limit":100}'
+The startup block already returned world bounds/rules, native dates, company finances and a town page; do not repeat those reads just to begin. Choose any other observations needed for YOUR goal, including industries or the caller-chosen map area. Read the exact local schemas before submitting guessed names/fields. `GET /v1/world/status` is an HTTP endpoint, not a text query named `world.status`.
+
+The mechanical sequence for your chosen service is: identify supply and an accepting destination; construct whatever compatible infrastructure/facilities it needs; build a compatible owned vehicle; insert orders to the actual selected facility tiles; start the vehicle in a known state; observe loading, destination arrival and paid delivery. These are prerequisites to check, not a supplied route or business plan. An accepted order and a moving vehicle alone are not a successful service. Check transport income and delivered cargo in `company.report`; cash, borrowing and vehicle sales are different facts.
+
+Use one open `AgentClient` for a short sequential script when several chosen calls can share a tool invocation. Its `action`/`retry` methods already wait up to 20 seconds by default: inspect their returned terminal receipt instead of adding status polls after success. If pending, recover that ID. Keep dependent steps conditional on successful results; do not run a speculative list of mutations after a failed step. Reuse the complete references/tiles from your own successful creation receipts, rather than rediscovering a known owned target through pool scans.
+
+For a NEW order, the existing helper carries current version tokens while leaving all order choices to you. This function demonstrates composition only; call it with YOUR chosen full vehicle reference and order parameters:
+
+```python
+from backend.agent_client import AgentClient
+a = AgentClient.open('./state')
+def submit_new_order(vehicle_reference, chosen_order_parameters):
+    saved = a.prepare_order('order.insert', vehicle_reference, chosen_order_parameters)
+    print('saved_request_id:', saved['request_id'], flush=True)
+    return a.retry(saved['request_id'])
 ```
 
-Read the returned map bounds, rules, native dates and company finances, then choose observations relevant to YOUR goal. Pool-query pagination generally uses returned next_after_id as the next after_id, even if a scanned page has no items. Public request limit is at most 100 and individual query schemas can be smaller (orders is 64, or 16 with live detail). Some queries are unpaginated and accept no limit. Preserve each query's actual cursor fields; do not invent after_id:-1 for every endpoint.
+Do not call preparation again to recover an unknown submission; use its saved request ID. Station order destinations are TILE coordinates, not station IDs. Omit TRAIN-ONLY `stop_location` for other vehicles. Normal load-if-possible is already the default; setting an unchanged value can be rejected as a native no-op. `vehicle.clone` with `share_orders:true` shares subsequent edits across that list's vehicles; inspect `shared_count`/orders before deciding to edit. Own roads can connect to compatible other-company roads without a joining grant; other companies' stations/depots have separate ownership rules.
+
+Pool-query pagination generally uses returned next_after_id as the next after_id, even if a scanned page has no items. Public request limit is at most 100 and individual query schemas can be smaller (orders is 64, or 16 with live detail). Some queries are unpaginated and accept no limit. Preserve each query's actual cursor fields; do not invent after_id:-1 for every endpoint.
 
 Useful canonical query families include vehicles/vehicle.details, stations/station.details/station.cargo.waiting/station.links/station.cargo.flows, industries/industry.details, catalog.engines, map.region and orders. Inspect each parameter schema first. Refresh facts when native time, references or supply change; an old empty queue or old industry output does not describe now. Keep timestamps/ticks and accounting periods in your own notes. Repeated loading, arrival, unloading and transport revenue are stronger evidence than a moving vehicle or one queue snapshot.
 
@@ -72,7 +96,7 @@ An illustrative typed action shape is:
 {"request_id":"example-new-depot","action":{"name":"road.depot.build","parameters":{"tile":{"x":10,"y":20},"road_type":0,"direction":"auto"}}}
 ```
 
-The coordinates, road type and ID are illustrative. Choose a legal site/type from current observations, then use action road.depot.build with YOUR parameters and a new ID, or post /v1/actions with your complete saved envelope. Native errors are real feedback, not an instruction to repeat a strategic decision blindly. Read the shared mechanics and recovery sections below before editing orders or scaling an operation.
+The coordinates, road type and ID are illustrative. Choose a legal site/type from current observations, then use action road.depot.build with YOUR parameters and a new ID, or post /v1/actions with your complete saved envelope. Native errors are real feedback, not an instruction to repeat a strategic decision blindly. The sections below supply exact recovery, geometry and communication details when relevant.
 
 ## Discover the contract before acting
 
@@ -90,7 +114,7 @@ PY
 
 Use the current catalog rather than guessing action/query names or extra fields. Both modes share typed gameplay actions and advisory POST /v1/actions/estimate. A successful estimate does not reserve funds or guarantee execution. Command receipts contain direct command feedback; inspect result.success/error as well as status. Accepted/queued/pending is not gameplay success, and completed can carry a native rejection. An uncertain result is not proof of rollback.
 
-Expensive public queries, estimates and control-reference reads have shared bounded native admission gates. Use modest pacing (more than one second for gated reads), honor retry delays, and bound retries of the same READ body when feedback indicates admission/transient unavailability. Other players share these gates, so pacing is not an admission guarantee. Do not busy-loop or turn a read failure into a new gameplay action. Invalid shapes or missing targets need correction/inspection, not blind polling.
+Expensive public queries, estimates and control-reference reads have bounded native admission gates. Apply the advertised pacing to those calls (more than one second for the shared one-second gates), not a blanket sleep after every cheap read. Honor retry delays and bound retries of the same READ body when feedback indicates admission/transient unavailability. Other players share gates, so pacing is not an admission guarantee. Do not busy-loop or turn a read failure into a new gameplay action. Invalid shapes or missing targets need correction/inspection, not blind polling.
 
 ## CLI and exact recovery
 
