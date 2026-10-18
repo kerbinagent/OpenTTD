@@ -1,4 +1,5 @@
 import { createSSEParser } from "/events.mjs";
+import { parseWorldStatus, sameWorldFence, worldStatusDecision, statusStreamCursor, pauseDescription } from "/world-status.mjs";
 
 const $ = id => document.getElementById(id);
 const dom = Object.fromEntries([
@@ -8,7 +9,7 @@ const dom = Object.fromEntries([
   "refresh-view", "live-view", "report-window", "open-window", "close-windows", "view-note",
   "thread-select", "mute-thread", "thread-description", "messages", "message-form",
   "message-body", "send-message", "message-feedback", "chat-status", "report-dialog",
-  "report-form", "report-reason", "report-feedback", "cancel-report",
+  "report-form", "report-reason", "report-feedback", "cancel-report", "world-status", "world-status-detail",
 ].map(id => [id, $(id)]));
 
 // One session, one camera, bounded chat state. Credentials never leave memory.
@@ -31,8 +32,11 @@ let historyBusy = false;
 let messages = new Map();
 let chatTimer = null;
 let threadRefreshBusy = false;
+let threadRefreshTask = null;
+let historyTask = null;
 let eventAbort = null;
 let cursor = "";
+let worldStatus = null;
 let reportMessage = null;
 let pendingMessage = null;
 let blocked = new Set();
@@ -49,7 +53,7 @@ function element(tag, className, text) {
   return item;
 }
 
-async function request(path, { method = "GET", body, signal, raw = false, token = session?.token, headers = {} } = {}) {
+async function request(path, { method = "GET", body, signal, raw = false, decode = null, token = session?.token, headers = {} } = {}) {
   if (!token) throw new APIError(401);
   const response = await fetch(path, {
     method, signal, credentials: "omit", cache: "no-store", redirect: "error",
@@ -58,7 +62,7 @@ async function request(path, { method = "GET", body, signal, raw = false, token 
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   if (!response.ok) throw new APIError(response.status);
-  return raw ? response : response.json();
+  return raw ? response : decode ? decode(await response.text()) : response.json();
 }
 
 function current(epoch) { return session && epoch === generation; }
@@ -69,6 +73,13 @@ function companyLabel(company, name) {
   return name || `Company ${Number(company) + 1}`;
 }
 function requestID() { return crypto.randomUUID(); }
+
+function showWorldStatus(value = null) {
+  const description = value ? pauseDescription(value) : { label: session ? "World status unavailable" : "World status offline", detail: session ? "Checking the current state again when the connection returns." : "Connect to see the shared pause state." };
+  status(dom["world-status"], description.label, !!value && !value.pause.paused);
+  dom["world-status"].classList.toggle("paused", !!value?.pause.paused);
+  dom["world-status-detail"].textContent = description.detail;
+}
 
 function setViewControls() {
   const canView = !!session;
@@ -102,8 +113,10 @@ function disconnect() {
   frameAbort?.abort(); historyAbort?.abort(); eventAbort?.abort();
   clearTimeout(frameTimer); clearTimeout(chatTimer);
   frameBusy = false; historyBusy = false; threadRefreshBusy = false;
+  historyTask = null; threadRefreshTask = null;
   nextCaptureAt = 0;
   cursor = ""; selectedThread = null; threads = []; messages.clear(); historyCursor = null;
+  worldStatus = null;
   pendingMessage = null; blocked.clear(); reportMessage = null; inspectMode = false;
   clearFrame();
   dom["report-dialog"].close();
@@ -124,6 +137,7 @@ function disconnect() {
   dom["message-feedback"].textContent = "";
   status(dom["chat-status"], "Offline");
   status(dom["view-status"], "Waiting for session");
+  showWorldStatus();
   renderMessages();
   setViewControls();
 }
@@ -347,7 +361,16 @@ function threadName(thread) {
   return "Direct · Player";
 }
 
-async function refreshThreads(epoch) {
+function refreshThreads(epoch) {
+  if (!current(epoch)) return Promise.resolve();
+  if (threadRefreshTask) return threadRefreshTask;
+  const task = refreshThreadsNow(epoch);
+  threadRefreshTask = task;
+  void task.finally(() => { if (threadRefreshTask === task) threadRefreshTask = null; });
+  return task;
+}
+
+async function refreshThreadsNow(epoch) {
   if (!current(epoch) || threadRefreshBusy) return;
   threadRefreshBusy = true;
   try {
@@ -385,6 +408,7 @@ function updateThreadUI() {
 async function selectThread(id) {
   threadRevision++;
   historyAbort?.abort();
+  historyTask = null;
   selectedThread = id;
   historyCursor = null;
   historyBusy = false;
@@ -466,7 +490,16 @@ function renderMessages() {
   if (atBottom) log.scrollTop = log.scrollHeight; else log.scrollTop = previousTop;
 }
 
-async function refreshHistory(epoch) {
+function refreshHistory(epoch) {
+  if (!current(epoch)) return Promise.resolve();
+  if (historyTask) return historyTask;
+  const task = refreshHistoryNow(epoch);
+  historyTask = task;
+  void task.finally(() => { if (historyTask === task) historyTask = null; });
+  return task;
+}
+
+async function refreshHistoryNow(epoch) {
   if (!current(epoch) || !selectedThread || historyBusy) return;
   const revision = threadRevision, thread = selectedThread;
   const controller = new AbortController();
@@ -490,6 +523,16 @@ async function refreshHistory(epoch) {
     clearTimeout(timeout);
     if (current(epoch) && revision === threadRevision) historyBusy = false;
   }
+}
+
+async function reconcileChat(epoch) {
+  // Finish work that may predate the snapshot, then fetch again after its
+  // cursor anchor. History has its own cursor: retain it even across >5 pages.
+  await threadRefreshTask;
+  if (!current(epoch)) return;
+  await refreshThreads(epoch);
+  await historyTask;
+  if (current(epoch)) await refreshHistory(epoch);
 }
 
 function scheduleChat(epoch) {
@@ -577,17 +620,51 @@ async function connectEvents(epoch) {
   const controller = new AbortController();
   eventAbort = controller;
   let backoff = 1000;
+  let refreshCursor = false;
   while (current(epoch) && !controller.signal.aborted) {
     let reader;
+    const attempt = new AbortController();
+    const abort = () => attempt.abort();
+    controller.signal.addEventListener("abort", abort, { once: true });
     try {
       status(dom["chat-status"], "Connecting…");
+      showWorldStatus();
+      const snapshotController = new AbortController();
+      const abortSnapshot = () => snapshotController.abort();
+      attempt.signal.addEventListener("abort", abortSnapshot, { once: true });
+      const timeout = setTimeout(abortSnapshot, 15000);
+      let snapshot;
+      try {
+        snapshot = await request("/v1/world/status", { signal: snapshotController.signal, decode: text => parseWorldStatus(text, true) });
+        if (worldStatus && sameWorldFence(worldStatus, snapshot) && snapshot.pause.revision < worldStatus.pause.revision) throw new TypeError("Stale world snapshot");
+      } catch {
+        // The native world can be recovering while backend chat still works.
+        // Never promote cached events to current state after a failed GET.
+        snapshot = null;
+        if (current(epoch) && !controller.signal.aborted) showWorldStatus();
+      } finally {
+        clearTimeout(timeout);
+        attempt.signal.removeEventListener("abort", abortSnapshot);
+      }
+      if (!current(epoch) || controller.signal.aborted) return;
+      if (snapshot) {
+        const nextCursor = statusStreamCursor(worldStatus, snapshot, cursor, refreshCursor);
+        const reset = refreshCursor || !cursor || !sameWorldFence(worldStatus, snapshot);
+        worldStatus = snapshot;
+        showWorldStatus(snapshot);
+        if (reset) await reconcileChat(epoch);
+        if (!current(epoch) || controller.signal.aborted) return;
+        cursor = nextCursor;
+        refreshCursor = false;
+      }
+      if (!current(epoch) || controller.signal.aborted) return;
       const response = await fetch("/v1/events", {
         headers: { Authorization: `Bearer ${session.token}`, Accept: "text/event-stream", ...(cursor ? { "Last-Event-ID": cursor } : {}) },
-        credentials: "omit", cache: "no-store", redirect: "error", signal: controller.signal,
+        credentials: "omit", cache: "no-store", redirect: "error", signal: attempt.signal,
       });
       if ([400, 409, 410].includes(response.status) && cursor) {
         cursor = "";
-        void refreshHistory(epoch);
+        refreshCursor = true;
         throw new APIError(response.status);
       }
       if (!response.ok || !response.body || !response.headers.get("Content-Type")?.startsWith("text/event-stream")) throw new APIError(response.status);
@@ -597,8 +674,19 @@ async function connectEvents(epoch) {
       const parser = createSSEParser(event => {
         if (!current(epoch)) return;
         if (event.id.length > 128) throw new RangeError("Invalid event cursor");
-        // Handle projected chat only. Events are data, never instructions or HTML.
+        // One durable cursor carries both chat and shared status. Events are
+        // data, never instructions or HTML.
         cursor = event.id;
+        if (event.type === "world.status") {
+          const incoming = parseWorldStatus(event.data);
+          const decision = snapshot ? worldStatusDecision(worldStatus, incoming) : "refresh";
+          if (decision === "refresh") {
+            refreshCursor = true;
+            throw new Error("Fresh world status required");
+          }
+          if (decision === "apply") { worldStatus = incoming; showWorldStatus(incoming); }
+          return;
+        }
         let data;
         try { data = JSON.parse(event.data); } catch { return; }
         if (!data || typeof data !== "object" || Array.isArray(data)) return;
@@ -620,11 +708,14 @@ async function connectEvents(epoch) {
     } catch (error) {
       if (!current(epoch) || controller.signal.aborted) return;
       status(dom["chat-status"], "Reconnecting…");
+      showWorldStatus();
     } finally {
+      controller.signal.removeEventListener("abort", abort);
       if (reader) { try { await reader.cancel(); } catch { /* Closed transport. */ } }
     }
     if (!current(epoch) || controller.signal.aborted) return;
     status(dom["chat-status"], "Reconnecting…");
+    showWorldStatus();
     await pause(backoff + Math.floor(Math.random() * 250), controller.signal);
     backoff = Math.min(backoff * 2, 30000);
   }
@@ -632,3 +723,4 @@ async function connectEvents(epoch) {
 
 window.addEventListener("pagehide", disconnect);
 setViewControls();
+showWorldStatus();

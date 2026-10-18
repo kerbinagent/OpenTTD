@@ -1047,6 +1047,23 @@ class Store:
                     return False
                 self.event_condition.wait(remaining)
 
+    def current_event_cursor(self, principal: Principal) -> str:
+        """Read the run's latest cursor before a fresh authority snapshot.
+
+        The lock is held only for this SQLite read, never across native RPC.
+        A recovering world cannot provide an authoritative current status.
+        """
+        with self.lock:
+            self.validate_principal(principal)
+            row = self.connection.execute(
+                "SELECT r.cursor_secret,r.next_event_seq,w.recovery_state "
+                "FROM runs r JOIN worlds w ON w.id=r.world_id WHERE r.id=?",
+                (principal.run_id,),
+            ).fetchone()
+            if row is None or row["recovery_state"] != "ready":
+                raise ServiceError("world_recovering", status=503)
+            return self._cursor(principal.run_id, row["cursor_secret"], row["next_event_seq"] - 1)
+
     def events(self, principal: Principal, after: str | None = None, limit: int = 100) -> dict[str, Any]:
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
             raise ServiceError("invalid_limit", "Event limit must be between 1 and 500")

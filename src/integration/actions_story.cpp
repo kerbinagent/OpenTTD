@@ -15,12 +15,17 @@
 #include "../company_base.h"
 #include "../goal_base.h"
 #include "../goal_cmd.h"
+#include "../engine_base.h"
+#include "../industry.h"
 #include "../misc/endian_buffer.hpp"
 #include "../network/network_base.h"
 #include "../story_base.h"
 #include "../story_cmd.h"
+#include "../station_base.h"
 #include "../string_func.h"
 #include "../strings_func.h"
+#include "../timer/timer_game_tick.h"
+#include "../town.h"
 #include "../vehicle_base.h"
 #include "../vehicle_func.h"
 
@@ -65,6 +70,168 @@ using QuestionInbox = std::deque<std::shared_ptr<const Question>>;
  * Client-private presentations stay in their genuine native windows only. */
 static std::map<uint16_t, std::map<Recipient, QuestionInbox>> _questions;
 static uint64_t _last_question_generation = 0;
+
+static constexpr size_t CUSTOM_NEWS_ROWS = 1024;
+static constexpr size_t CUSTOM_NEWS_BYTES = 4 * 1024 * 1024;
+static constexpr size_t CUSTOM_NEWS_ITEM_BYTES = 65536;
+static constexpr size_t CUSTOM_NEWS_REPORT_BYTES = 40 * 1024;
+
+/** Historical values only: never look up an old numeric reference while reading. */
+struct CustomNewsReference {
+	enum class Kind { None, Tile, Vehicle, Station, Industry, Town, Engine } kind = Kind::None;
+	uint32_t id = 0;
+	uint64_t generation = 0;
+	TileIndex location = INVALID_TILE;
+};
+
+struct CustomNews {
+	uint64_t sequence;
+	uint64_t tick;
+	TimerGameCalendar::Date date;
+	NewsType type;
+	CustomNewsReference reference;
+	EncodedString text;
+};
+
+struct CustomNewsInbox {
+	uint64_t generation = 0;
+	uint64_t last_sequence = 0;
+	uint64_t history_floor = 0;
+	bool exhausted = false;
+	size_t encoded_bytes = 0;
+	std::deque<CustomNews> rows;
+};
+
+static std::array<CustomNewsInbox, MAX_COMPANIES> _custom_news;
+
+CustomNewsInbox &NewsInbox(const Company *company)
+{
+	auto &inbox = _custom_news[company->index.base()];
+	if (inbox.generation != company->GetInstanceGeneration()) {
+		inbox = {};
+		inbox.generation = company->GetInstanceGeneration();
+	}
+	return inbox;
+}
+
+CustomNewsInbox &VisibleNews()
+{
+	const Company *company = Company::GetIfValid(_current_company);
+	if (company == nullptr) throw InvalidParameters("News recipient is unavailable");
+	auto &inbox = NewsInbox(company);
+	if (inbox.exhausted) throw InvalidParameters("News history is unavailable");
+	return inbox;
+}
+
+Json NewsCursor(const CustomNewsInbox &inbox, uint64_t sequence)
+{
+	return {{"id", sequence}, {"generation", inbox.generation}, {"engine_instance_id", InstanceId()}};
+}
+
+uint64_t ReadNewsCursor(const Json &cursor, const CustomNewsInbox &inbox, bool item)
+{
+	if (!cursor.is_object() || cursor.size() != 3 || !cursor.contains("id") || !cursor.contains("generation") || !cursor.contains("engine_instance_id")) {
+		throw InvalidParameters("News requires a complete recipient cursor");
+	}
+	if (!cursor.at("engine_instance_id").is_string() || cursor.at("engine_instance_id").get_ref<const std::string &>() != InstanceId()) {
+		throw InvalidParameters("News cursor belongs to another engine instance");
+	}
+	const auto &generation = cursor.at("generation");
+	if (!generation.is_number_integer() || (!generation.is_number_unsigned() && generation.get<int64_t>() < 1) || generation.get<uint64_t>() != inbox.generation) {
+		throw InvalidParameters("News cursor belongs to another recipient");
+	}
+	uint64_t sequence = static_cast<uint64_t>(Parameters(cursor).Int("id", item ? 1 : 0, INT64_MAX));
+	if (sequence > inbox.last_sequence) throw InvalidParameters("News cursor is beyond the latest issuance");
+	return sequence;
+}
+
+CustomNewsReference SnapshotNewsReference(const NewsReference &reference)
+{
+	using Kind = CustomNewsReference::Kind;
+	return std::visit([](const auto &id) -> CustomNewsReference {
+		using T = std::remove_cvref_t<decltype(id)>;
+		if constexpr (std::is_same_v<T, std::monostate>) {
+			return {};
+		} else if constexpr (std::is_same_v<T, TileIndex>) {
+			return {Kind::Tile, 0, 0, id};
+		} else if constexpr (std::is_same_v<T, EngineID>) {
+			return {Kind::Engine, id.base()};
+		} else {
+			CustomNewsReference result;
+			result.id = id.base();
+			if constexpr (std::is_same_v<T, VehicleID>) {
+				const Vehicle *vehicle = Vehicle::Get(id);
+				result.kind = Kind::Vehicle;
+				result.generation = vehicle->GetInstanceGeneration();
+				result.location = TileXY(Clamp(vehicle->x_pos / static_cast<int>(TILE_SIZE), 0, static_cast<int>(Map::MaxX())), Clamp(vehicle->y_pos / static_cast<int>(TILE_SIZE), 0, static_cast<int>(Map::MaxY())));
+			} else if constexpr (std::is_same_v<T, StationID>) {
+				const Station *station = Station::Get(id);
+				result.kind = Kind::Station;
+				result.generation = station->GetInstanceGeneration();
+				result.location = station->xy;
+			} else if constexpr (std::is_same_v<T, IndustryID>) {
+				const Industry *industry = Industry::Get(id);
+				result.kind = Kind::Industry;
+				result.generation = industry->GetInstanceGeneration();
+				result.location = industry->location.tile + TileDiffXY(1, 1);
+			} else if constexpr (std::is_same_v<T, TownID>) {
+				const Town *town = Town::Get(id);
+				result.kind = Kind::Town;
+				result.generation = town->GetInstanceGeneration();
+				result.location = town->xy;
+			}
+			return result;
+		}
+	}, reference);
+}
+
+Json NewsReferenceMetadata(const CustomNewsReference &reference)
+{
+	using Kind = CustomNewsReference::Kind;
+	if (reference.kind == Kind::None) return nullptr;
+	if (reference.kind == Kind::Tile) return Json{{"kind", "tile"}, {"location", Detail::TileCoordinates(reference.location)}};
+	if (reference.kind == Kind::Engine) return Json{{"kind", "engine"}, {"engine_id", reference.id}};
+	const char *kind = reference.kind == Kind::Vehicle ? "vehicle" : reference.kind == Kind::Station ? "station" : reference.kind == Kind::Industry ? "industry" : "town";
+	return {{"kind", kind}, {"target", {{"id", reference.id}, {"generation", reference.generation}, {"engine_instance_id", InstanceId()}}},
+		{"location", IsValidTile(reference.location) ? Detail::TileCoordinates(reference.location) : Json(nullptr)}};
+}
+
+Json CustomNewsMetadata(const CustomNewsInbox &inbox, const CustomNews &news)
+{
+	static constexpr std::array<std::string_view, to_underlying(NewsType::End)> TYPES = {
+		"arrival_company", "arrival_other", "accident", "accident_other", "company_info", "industry_open", "industry_close", "economy",
+		"industry_company", "industry_other", "industry_nobody", "advice", "new_vehicles", "acceptance", "subsidies", "general",
+	};
+	auto date = TimerGameCalendar::ConvertDateToYMD(news.date);
+	return {{"news_id", NewsCursor(inbox, news.sequence)}, {"issued_tick", news.tick},
+		{"calendar_date", {{"year", date.year.base()}, {"month", date.month + 1}, {"day", date.day}}},
+		{"news_type", TYPES[to_underlying(news.type)]}, {"reference", NewsReferenceMetadata(news.reference)}};
+}
+
+Json QueryCustomNews(const Json &parameters)
+{
+	if (!parameters.is_object()) throw InvalidParameters("Invalid news parameters");
+	for (auto it = parameters.begin(); it != parameters.end(); ++it) {
+		if (it.key() != "after" && it.key() != "limit") throw InvalidParameters("Unknown news parameter");
+	}
+	auto &inbox = VisibleNews();
+	uint64_t after = parameters.contains("after") ? ReadNewsCursor(parameters.at("after"), inbox, false) : 0;
+	size_t limit = static_cast<size_t>(Parameters(parameters).Int("limit", 1, 32, 32));
+	uint64_t next = std::max(after, inbox.history_floor);
+	Json items = Json::array();
+	for (const auto &news : inbox.rows) {
+		if (news.sequence <= next) continue;
+		if (items.size() == limit) break;
+		items.push_back(CustomNewsMetadata(inbox, news));
+		next = news.sequence;
+	}
+	Json result = Detail::SnapshotBase();
+	result.update({{"history_scope", "current_engine_instance"}, {"history_start", NewsCursor(inbox, inbox.history_floor)},
+		{"latest", NewsCursor(inbox, inbox.last_sequence)}, {"gap", after < inbox.history_floor}, {"items", std::move(items)},
+		{"next", NewsCursor(inbox, next)}, {"complete", next == inbox.last_sequence}});
+	if (result.dump().size() > CUSTOM_NEWS_REPORT_BYTES) throw InvalidParameters("News report exceeds byte budget");
+	return result;
+}
 
 std::optional<Recipient> CompanyRecipient(CompanyID id)
 {
@@ -451,10 +618,72 @@ void StoryQuestionsClosed(uint16_t id)
 	if (found->second.empty()) _questions.erase(found);
 }
 
-void ResetStoryPresentations() { _questions.clear(); }
+void CustomNewsPresented(NewsType type, CompanyID target, const NewsReference &reference, const EncodedString &text)
+{
+	/* Native validation precedes this Execute-only hook. No formatting, company
+	 * scope switch, callback or bridge initialization belongs in this path. */
+	for (size_t id = 0; id < _custom_news.size(); ++id) {
+		const Company *company = Company::GetIfValid(CompanyID(static_cast<uint8_t>(id)));
+		if (company == nullptr || company->GetInstanceGeneration() != _custom_news[id].generation) _custom_news[id] = {};
+	}
+	const size_t bytes = text.GetEncodedSize();
+	const CustomNewsReference snapshot = bytes <= CUSTOM_NEWS_ITEM_BYTES ? SnapshotNewsReference(reference) : CustomNewsReference{};
+	for (const Company *company : Company::Iterate()) {
+		if (target != INVALID_OWNER && target != company->index) continue;
+		auto &inbox = NewsInbox(company);
+		if (inbox.exhausted) continue;
+		if (inbox.last_sequence == INT64_MAX) {
+			inbox.exhausted = true;
+			inbox.rows.clear();
+			inbox.encoded_bytes = 0;
+			inbox.history_floor = inbox.last_sequence;
+			continue;
+		}
+		++inbox.last_sequence;
+		if (bytes > CUSTOM_NEWS_ITEM_BYTES) {
+			/* Loss is a prefix watermark, never a partial or decoded substitute. */
+			inbox.rows.clear();
+			inbox.encoded_bytes = 0;
+			inbox.history_floor = inbox.last_sequence;
+			continue;
+		}
+		inbox.rows.push_back({inbox.last_sequence, TimerGameTick::counter, TimerGameCalendar::date, type, snapshot, text});
+		inbox.encoded_bytes += bytes;
+		while (inbox.rows.size() > CUSTOM_NEWS_ROWS || inbox.encoded_bytes > CUSTOM_NEWS_BYTES) {
+			inbox.history_floor = inbox.rows.front().sequence;
+			inbox.encoded_bytes -= inbox.rows.front().text.GetEncodedSize();
+			inbox.rows.pop_front();
+		}
+	}
+}
+
+void ResetStoryPresentations()
+{
+	_questions.clear();
+	for (size_t id = 0; id < _custom_news.size(); ++id) {
+		auto &inbox = _custom_news[id];
+		const Company *company = Company::GetIfValid(CompanyID(static_cast<uint8_t>(id)));
+		if (company == nullptr || company->GetInstanceGeneration() != inbox.generation) {
+			inbox = {};
+			continue;
+		}
+		inbox.rows.clear();
+		inbox.encoded_bytes = 0;
+		inbox.history_floor = inbox.last_sequence;
+	}
+}
 uint64_t LastStoryQuestionGeneration() { return _last_question_generation; }
 
 namespace Detail {
+
+const EncodedString &CustomNewsText(const Json &target)
+{
+	const auto &inbox = VisibleNews();
+	const uint64_t sequence = ReadNewsCursor(target, inbox, true);
+	auto found = std::ranges::lower_bound(inbox.rows, sequence, {}, &CustomNews::sequence);
+	if (found == inbox.rows.end() || found->sequence != sequence) throw InvalidParameters("News target is unavailable");
+	return found->text;
+}
 
 Json ResolveStoryControlReference(const std::string &kind, uint32_t id)
 {
@@ -558,6 +787,10 @@ std::optional<Json> CaptureStoryTargets(const std::string &action, const Json &p
 
 std::optional<Json> QueryStoryState(const std::string &query, const Json &parameters)
 {
+	if (query == "news.custom") {
+		RequireCompany();
+		return QueryCustomNews(parameters);
+	}
 	if (query != "goal.questions" && query != "goal.question" && query != "story.pages" && query != "story.elements" && query != "story.element" && query != "story.vehicle_candidates") return std::nullopt;
 	RequireCompany();
 	Parameters p(parameters);

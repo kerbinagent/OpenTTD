@@ -23,6 +23,9 @@ void PublishEvent(const Json &event);
 /** Opaque boot identity used by private protocol fences and public entity handles. */
 std::string_view InstanceId();
 
+/** Shared pause metadata and boot-scoped revision; does not initialize IPC. */
+Json CurrentPauseStatus();
+
 /** Consume normal prequeue native test feedback for the active typed submission. */
 std::optional<Json> TakeSubmittedPostFailure();
 

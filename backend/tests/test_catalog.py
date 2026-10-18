@@ -15,7 +15,7 @@ class CatalogTest(unittest.TestCase):
     def test_compact_engine_capabilities_match_catalog_identity(self):
         self.assertEqual(CATALOG_HASH_ALGORITHM, "blake2b-256")
         self.assertEqual(CATALOG_HASH,
-                         "065c3a37efdf8569c2ab063bdc12ebe0257d860af6b11ebb7a9fbd09144ff4a5")
+                         "0652cacfe54fd836b41803610e2dd986c324076f7faf3395a820f9bfbe0b0369")
         capabilities = {key: copy.deepcopy(value) for key, value in CATALOG.items()
                         if key not in ("actions", "queries")}
         capabilities.update(actions=list(CATALOG_ACTION_NAMES), queries=list(CATALOG_QUERY_NAMES),
@@ -49,7 +49,7 @@ class CatalogTest(unittest.TestCase):
     def test_catalog_is_engine_generated_surface(self):
         self.assertEqual(CATALOG["version"], 1)
         self.assertEqual(len(CATALOG["actions"]), 104)
-        self.assertEqual(len(CATALOG["queries"]), 59)
+        self.assertEqual(len(CATALOG["queries"]), 60)
         self.assertEqual(action_spec("ui.apply")["modes"], ["visual"])
         self.assertEqual(sum(spec["modes"] == ["text", "visual"] for spec in CATALOG["actions"]), 103)
         self.assertIsNone(action_spec("tool.apply"))
@@ -128,6 +128,96 @@ class CatalogTest(unittest.TestCase):
             "station_site_interval_ms", "station_site_name_bytes")}, {
                 "estimate_interval_ms": 1000, "estimate_result_bytes": 4096,
                 "station_site_interval_ms": 1000, "station_site_name_bytes": 64})
+
+    def test_actual_custom_news_catalog_has_closed_cursor_and_disjoint_text_kind(self):
+        news = query_spec("news.custom")
+        self.assertEqual(news["modes"], ["text"])
+        self.assertEqual(news["target_kind"], "none")
+        self.assertEqual(news["result_fields"], ["tick", "company_id",
+            "history_scope", "history_start", "latest", "gap", "items",
+            "next", "complete"])
+        params = news["parameters"]
+        self.assertEqual((params["type"], params["required"],
+                          params["additionalProperties"]), ("object", [], False))
+        self.assertEqual(set(params["properties"]), {"after", "limit"})
+        self.assertEqual(params["properties"]["limit"], {
+            "type": "integer", "minimum": 1, "maximum": 32})
+        cursor = params["properties"]["after"]
+        self.assertEqual(cursor["required"], ["id", "generation",
+                                               "engine_instance_id"])
+        self.assertIs(cursor["additionalProperties"], False)
+        self.assertEqual(cursor["properties"], {
+            "id": {"type": "integer", "minimum": 0,
+                   "maximum": 0x7FFFFFFFFFFFFFFF},
+            "generation": {"type": "integer", "minimum": 1,
+                           "maximum": 0xFFFFFFFFFFFFFFFF},
+            "engine_instance_id": {"type": "string", "minLength": 1,
+                                   "maxLength": 256}})
+        after = {"id": 0x7FFFFFFFFFFFFFFF,
+                 "generation": 0xFFFFFFFFFFFFFFFF,
+                 "engine_instance_id": "b" * 256}
+        self.assertEqual(validate_parameters(news, {}), {})
+        self.assertEqual(validate_parameters(news, {"after": after, "limit": 32}),
+                         {"after": after, "limit": 32})
+        for invalid in ({"after": {**after, "id": True}},
+                        {"after": {**after, "id": 1 << 63}},
+                        {"after": {**after, "generation": 0}},
+                        {"after": {**after, "private": 1}},
+                        {"after": {"id": 0, "generation": 1}},
+                        {"limit": 0}, {"limit": 33}, {"company_id": 1}):
+            with self.subTest(invalid=invalid), self.assertRaises(ServiceError):
+                validate_parameters(news, invalid)
+
+        display = query_spec("display.text")
+        branches = display["parameters"]["anyOf"]
+        self.assertEqual(len(branches), 14)
+        news_branches = [branch for branch in branches
+                         if branch["properties"]["kind"]["enum"] ==
+                         ["news_custom_text"]]
+        self.assertEqual(len(news_branches), 2)
+        self.assertTrue(all(branch["additionalProperties"] is False
+                            for branch in news_branches))
+        self.assertEqual({tuple(branch["required"]) for branch in news_branches}, {
+            ("kind", "target"),
+            ("kind", "target", "after_byte", "expected_content_version")})
+        for branch in news_branches:
+            target = branch["properties"]["target"]
+            self.assertEqual(target["properties"]["id"], {
+                "type": "integer", "minimum": 1,
+                "maximum": 0x7FFFFFFFFFFFFFFF})
+            self.assertEqual(target["properties"]["generation"],
+                             cursor["properties"]["generation"])
+            self.assertEqual(target["properties"]["engine_instance_id"],
+                             cursor["properties"]["engine_instance_id"])
+            self.assertEqual(branch["properties"]["limit"], {
+                "type": "integer", "minimum": 1, "maximum": 2048})
+            self.assertEqual(branch["properties"]["expected_content_version"], {
+                "type": "string", "minLength": 64, "maxLength": 64})
+        first = {"kind": "news_custom_text", "target": {**after, "id": 1}}
+        self.assertEqual(validate_parameters(display, first), first)
+        continued = {**first, "after_byte": 1,
+                     "expected_content_version": "a" * 64}
+        self.assertEqual(validate_parameters(display, continued), continued)
+        for invalid in ({**first, "target": {**after, "id": 0}},
+                        {**first, "after_byte": 1},
+                        {**continued, "after_byte": True},
+                        {**first, "private": 1}):
+            with self.subTest(invalid=invalid), self.assertRaises(ServiceError):
+                validate_parameters(display, invalid)
+        old_town = next(branch for branch in branches if "town_text" in
+                        branch["properties"]["kind"]["enum"] and
+                        "after_byte" not in branch["required"])
+        self.assertEqual(old_town["properties"]["target"]["properties"]["id"], {
+            "type": "integer", "minimum": 0, "maximum": 63999})
+        self.assertEqual({key: CATALOG["limits"][key] for key in (
+            "custom_news_rows", "custom_news_encoded_bytes",
+            "custom_news_item_encoded_bytes", "custom_news_page_rows")}, {
+                "custom_news_rows": 1024,
+                "custom_news_encoded_bytes": 4194304,
+                "custom_news_item_encoded_bytes": 65536,
+                "custom_news_page_rows": 32})
+        self.assertIn("live native names/language",
+                      CATALOG["conventions"]["custom_news"])
 
     def test_shared_actions_leave_observations_text_only_and_reference_selectors_closed(self):
         self.assertTrue(all(spec["modes"] == ["text"] for spec in CATALOG["queries"]))

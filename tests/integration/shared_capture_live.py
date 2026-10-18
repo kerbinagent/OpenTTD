@@ -44,8 +44,10 @@ from public_services_live import LifecycleWorld, runtime_fingerprints
 @unittest.skipUnless(os.environ.get("OPENTTD_TEST_BINARY") and os.environ.get("OPENTTD_TEST_BASESET"),
                      "Set matching integration binary and OpenGFX assets for shared-capture HTTP acceptance")
 class SharedCaptureActuators(unittest.TestCase):
+    world_type = LifecycleWorld
+
     def setUp(self):
-        self.world = LifecycleWorld(os.environ["OPENTTD_TEST_BINARY"], os.environ["OPENTTD_TEST_BASESET"],
+        self.world = self.world_type(os.environ["OPENTTD_TEST_BINARY"], os.environ["OPENTTD_TEST_BASESET"],
                                     port=int(os.environ.get("OPENTTD_TEST_PORT", "25978")))
         self.backend = self.backend_log = None
         self.stage = "startup"

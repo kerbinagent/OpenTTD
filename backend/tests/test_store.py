@@ -45,6 +45,18 @@ class StoreTests(unittest.TestCase):
         self.assert_code("unauthorized", lambda: self.store.validate_principal(alice))
         self.assertEqual(self.store.principals_for_world("world"), [bob])
 
+    def test_current_event_cursor_is_latest_and_refuses_recovery(self):
+        _, principal = self.principal()
+        initial = self.store.current_event_cursor(principal)
+        self.assertEqual(self.store.events(principal, after=initial)["events"], [])
+        self.store.append_event(principal, "example", {"value": 1})
+        current = self.store.current_event_cursor(principal)
+        self.assertNotEqual(current, initial)
+        self.assertEqual([event["type"] for event in self.store.events(principal, after=initial)["events"]], ["example"])
+        self.assertEqual(self.store.events(principal, after=current)["events"], [])
+        self.store.begin_recovery("world", "new-boot")
+        self.assert_code("world_recovering", lambda: self.store.current_event_cursor(principal))
+
     def test_provision_validation_epoch_and_rotation(self):
         for args, code in [
             ({"company_id": -1}, "invalid_company"),

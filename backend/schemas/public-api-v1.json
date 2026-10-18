@@ -495,6 +495,50 @@
       "required": ["estimate"],
       "additionalProperties": false
     },
+    "pauseStatus": {
+      "type": "object",
+      "properties": {
+        "paused": {"type": "boolean"},
+        "reasons": {
+          "type": "array",
+          "items": {"enum": ["manual", "saving_loading", "joining", "error",
+                             "insufficient_clients", "game_script", "link_graph", "other"]},
+          "maxItems": 8,
+          "uniqueItems": true,
+          "description": "Native reason order is validated by the service. An unpaused world has no reasons."
+        },
+        "command_policy": {"enum": ["no_actions", "no_construction",
+                                      "no_landscaping", "all_actions"]},
+        "revision": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}
+      },
+      "required": ["paused", "reasons", "command_policy", "revision"],
+      "additionalProperties": false
+    },
+    "worldStatusResponse": {
+      "type": "object",
+      "properties": {
+        "world_id": {"type": "string"},
+        "world_epoch": {"type": "string"},
+        "engine_instance_id": {"type": "string"},
+        "pause": {"$ref": "#/$defs/pauseStatus"},
+        "event_cursor": {"type": "string"}
+      },
+      "required": ["world_id", "world_epoch", "engine_instance_id", "pause", "event_cursor"],
+      "additionalProperties": false
+    },
+    "worldStatusEventData": {
+      "type": "object",
+      "properties": {
+        "world_id": {"type": "string"},
+        "world_epoch": {"type": "string"},
+        "engine_instance_id": {"type": "string"},
+        "pause": {"$ref": "#/$defs/pauseStatus"},
+        "baseline": {"type": "boolean"},
+        "history_gap": {"type": "boolean"}
+      },
+      "required": ["world_id", "world_epoch", "engine_instance_id", "pause"],
+      "additionalProperties": false
+    },
     "actionStatus": {
       "enum": [
         "accepted",
@@ -1123,6 +1167,15 @@
           },
           "required": ["endpoint", "interval_ms", "result_bytes"],
           "additionalProperties": false
+        },
+        "world_status": {
+          "type": "object",
+          "properties": {
+            "endpoint": {"const": "/v1/world/status"},
+            "event": {"const": "world.status"}
+          },
+          "required": ["endpoint", "event"],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -1591,6 +1644,16 @@
             "type",
             "data"
           ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {"type": "string"},
+            "type": {"const": "world.status"},
+            "data": {"$ref": "#/$defs/worldStatusEventData"}
+          },
+          "required": ["id", "type", "data"],
           "additionalProperties": false
         }
       ]

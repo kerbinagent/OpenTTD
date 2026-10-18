@@ -1332,7 +1332,10 @@ static void FormatString(StringBuilder &builder, std::string_view str_arg, Strin
 
 				case SCC_DECIMAL: { // {DECIMAL}
 					int64_t number = args.GetNextParameter<int64_t>();
-					int digits = args.GetNextParameter<int>();
+					int64_t raw_digits = args.GetNextParameter<int64_t>();
+					/* The power must fit the signed divisor, before narrowing or formatting. */
+					if (raw_digits < 0 || raw_digits > 18) throw std::out_of_range("Invalid decimal precision");
+					int digits = static_cast<int>(raw_digits);
 					if (digits == 0) {
 						FormatCommaNumber(builder, number);
 						break;
@@ -1631,18 +1634,25 @@ static void FormatString(StringBuilder &builder, std::string_view str_arg, Strin
 				}
 
 				case SCC_DEPOT_NAME: { // {DEPOT}
-					VehicleType vt = args.GetNextParameter<VehicleType>();
+					uint64_t raw_type = args.GetNextParameter();
+					uint64_t index = args.GetNextParameter();
+					if (raw_type != to_underlying(VehicleType::Train) && raw_type != to_underlying(VehicleType::Road) &&
+							raw_type != to_underlying(VehicleType::Ship) && raw_type != to_underlying(VehicleType::Aircraft)) break;
+					VehicleType vt = static_cast<VehicleType>(raw_type);
 					if (vt == VehicleType::Aircraft) {
-						auto tmp_params = MakeParameters(args.GetNextParameter<StationID>());
+						StationID station_id = index < StationID::End().base() ? static_cast<StationID>(index) : StationID::Invalid();
+						auto tmp_params = MakeParameters(station_id);
 						GetStringWithArgs(builder, STR_FORMAT_DEPOT_NAME_AIRCRAFT, tmp_params);
 						break;
 					}
 
-					const Depot *d = Depot::Get(args.GetNextParameter<DepotID>());
+					if (index >= DepotID::End().base()) break;
+					const Depot *d = Depot::GetIfValid(static_cast<DepotID>(index));
+					if (d == nullptr) break;
 					if (!d->name.empty()) {
 						auto tmp_params = MakeParameters(d->name);
 						GetStringWithArgs(builder, STR_JUST_RAW_STRING, tmp_params);
-					} else {
+					} else if (d->town != nullptr) {
 						auto tmp_params = MakeParameters(d->town->index, d->town_cn + 1);
 						GetStringWithArgs(builder, STR_FORMAT_DEPOT_NAME_TRAIN + 2 * to_underlying(vt) + (d->town_cn == 0 ? 0 : 1), tmp_params);
 					}

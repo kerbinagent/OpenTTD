@@ -41,6 +41,7 @@ _STATIC = {
     "/viewer.js": ("viewer.js", "text/javascript; charset=utf-8"),
     "/viewer.css": ("viewer.css", "text/css; charset=utf-8"),
     "/events.mjs": ("events.mjs", "text/javascript; charset=utf-8"),
+    "/world-status.mjs": ("world-status.mjs", "text/javascript; charset=utf-8"),
 }
 
 

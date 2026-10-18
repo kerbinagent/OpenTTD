@@ -107,6 +107,8 @@ struct State {
 	std::vector<Client> clients;
 	std::deque<Json> events;
 	uint64_t next_event = 1;
+	Json pause_facts;
+	uint64_t pause_revision = 0;
 	std::optional<CheckpointTicket> checkpoint;
 	std::filesystem::path checkpoint_path;
 	std::string checkpoint_status = "idle";
@@ -117,6 +119,46 @@ State &GetState()
 {
 	static State state;
 	return state;
+}
+
+/** Shared control metadata only; native command categories remain authoritative. */
+Json PauseFacts()
+{
+	Json reasons = Json::array();
+	static constexpr std::pair<PauseMode, const char *> names[] = {
+		{PauseMode::Normal, "manual"},
+		{PauseMode::SaveLoad, "saving_loading"},
+		{PauseMode::Join, "joining"},
+		{PauseMode::Error, "error"},
+		{PauseMode::ActiveClients, "insufficient_clients"},
+		{PauseMode::GameScript, "game_script"},
+		{PauseMode::LinkGraph, "link_graph"},
+	};
+	for (const auto &[mode, name] : names) if (_pause_mode.Test(mode)) reasons.push_back(name);
+	/* CommandDuringPause is bookkeeping, not an additional pause cause. */
+	if (_pause_mode.Any() && reasons.empty()) reasons.push_back("other");
+	static constexpr const char *policies[] = {"no_actions", "no_construction", "no_landscaping", "all_actions"};
+	const size_t policy = std::min<size_t>(to_underlying(_settings_game.construction.command_pause_level), std::size(policies) - 1);
+	return {{"paused", _pause_mode.Any()}, {"reasons", std::move(reasons)}, {"command_policy", policies[policy]}};
+}
+
+/** No listener/ledger initialization; the first observation is a baseline. */
+Json ObservePauseStatus()
+{
+	auto &s = GetState();
+	Json facts = PauseFacts();
+	const bool changed = facts != s.pause_facts;
+	const bool initial = s.pause_revision == 0;
+	if (changed) {
+		/* Exhaustion cannot wrap and make old revisions appear current. */
+		if (s.pause_revision == UINT64_MAX) { s.world_replaced = true; return Json(); }
+		s.pause_facts = std::move(facts);
+		++s.pause_revision;
+	}
+	Json result = s.pause_facts;
+	result["revision"] = s.pause_revision;
+	if (changed && !initial && Enabled()) PublishEvent({{"type", "world.status"}, {"data", {{"pause", result}}}});
+	return result;
 }
 
 std::string loaded_path;
@@ -540,9 +582,14 @@ Json Handle(const Json &request)
 	bool visual = request.contains("actor") && request.at("actor").is_object() && request.at("actor").value("mode", std::string()) == "visual";
 	if (type == "hello") {
 		Json capabilities = CompactCapabilities(visual || RendererIsActive());
+		/* Discovery remains available during recovery; a replaced/unready world
+		 * cannot supply current authoritative metadata under its previous fence.
+		 * Renderer hello describes only its private replica, never the authority. */
+		const bool pause_available = RendererIsActive() || (AuthoritativeReady() && s.ledger && s.ledger->Healthy() &&
+			!s.world_replaced && s.load_reconciled && !s.ledger->RecoveryRequired());
 		Json result = {{"engine_instance_id", s.instance}, {"world_epoch", s.epoch}, {"role", RendererIsActive() ? "renderer" : "world"},
 			{"capabilities", std::move(capabilities)}, {"native_max_lag_ticks", _settings_client.network.max_lag_time}, {"baseline_hash", std::string(_openttd_revision_hash)},
-			{"recovery_required", s.ledger ? s.ledger->RecoveryRequired() : false}};
+			{"recovery_required", s.ledger ? s.ledger->RecoveryRequired() : false}, {"pause", pause_available ? ObservePauseStatus() : Json()}};
 		if (RendererIsActive()) {
 			const NetworkClientInfo *native = _networking && !_network_server && MyClient::IsConnected() ? NetworkClientInfo::GetByClientID(_network_own_client_id) : nullptr;
 			result["native_public_key"] = native == nullptr ? "" : native->public_key;
@@ -826,6 +873,10 @@ Json Handle(const Json &request)
 
 std::string_view InstanceId() { return GetState().instance; }
 
+Json CurrentPauseStatus() { return ObservePauseStatus(); }
+
+void PauseChanged() { if (TracksPlayerPresentations()) ObservePauseStatus(); }
+
 bool Enabled() { return GetState().configured && !RendererIsActive() && _networking && _network_server; }
 
 bool TracksPlayerPresentations()
@@ -880,7 +931,7 @@ std::optional<Json> TakeSubmittedPostFailure()
 	return failure;
 }
 
-bool ValidateQueuedCommand(uint64_t token)
+bool ValidateQueuedCommand(uint64_t token, Commands command)
 {
 	auto &s = GetState();
 	auto found = s.pending.find(token);
@@ -890,7 +941,7 @@ bool ValidateQueuedCommand(uint64_t token)
 	if (!AuthoritativeReady() || !Bound(found->second.actor) || _settings_client.network.frame_freq != 0 || s.world_replaced) {
 		Reject(found->second, "stale_context"); s.pending.erase(found); return false;
 	}
-	if (_pause_mode.Any()) { Reject(found->second, "world_paused"); s.pending.erase(found); return false; }
+	if (_pause_mode.Any() && !IsCommandAllowedWhilePaused(command)) { Reject(found->second, "world_paused"); s.pending.erase(found); return false; }
 	AutoRestoreBackup current(_current_company, CompanyID(found->second.actor.at("company_id").get<uint8_t>()));
 	const auto &action = found->second.action;
 	auto result = found->second.visual ? ValidateVisualCommand(*found->second.visual) :
@@ -990,6 +1041,7 @@ void Tick()
 	Initialize();
 	auto &s = GetState();
 	if (!s.configured) return;
+	ObservePauseStatus();
 	ReconcileLoaded();
 	if (s.company_creation && Company::IsValidID(CompanyID(*s.company_creation))) s.company_creation.reset();
 #ifndef _WIN32

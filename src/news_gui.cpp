@@ -37,6 +37,10 @@
 #include "timer/timer.h"
 #include "timer/timer_window.h"
 #include "timer/timer_game_calendar.h"
+#ifdef WITH_INTEGRATION
+#include "integration/actions_story.h"
+#include "integration/bridge_hooks.h"
+#endif
 
 #include "widgets/news_widget.h"
 
@@ -977,6 +981,12 @@ CommandCost CmdCustomNewsItem(DoCommandFlags flags, NewsType type, CompanyID com
 	};
 
 	if (!std::visit(visitor{}, reference)) return CMD_ERROR;
+
+#ifdef WITH_INTEGRATION
+	if (flags.Test(DoCommandFlag::Execute) && Integration::TracksPlayerPresentations() && !Integration::RendererIsActive()) {
+		Integration::CustomNewsPresented(type, company, reference, text);
+	}
+#endif
 
 	if (company != INVALID_OWNER && company != _local_company) return CommandCost();
 

@@ -14,6 +14,7 @@
 #include "actions.h"
 #include "integration_bridge.h"
 #include "visual_commands.h"
+#include "../command_func.h"
 #include "../blitter/factory.hpp"
 #include "../company_base.h"
 #include "../company_func.h"
@@ -350,6 +351,7 @@ bool RendererCaptureNativeCommand(Commands command, StringID error, CommandCallb
 	try {
 		if (_renderer.text_only) throw std::runtime_error("blocked");
 		if (company != _renderer.company || data.size() > 8192 || !IsAllowedNativeCommand(command)) throw std::runtime_error("blocked");
+		if (_pause_mode.Any() && !IsCommandAllowedWhilePaused(command)) throw std::runtime_error("blocked");
 		auto callback_index = NativeCallbackIndex(command, callback);
 		CommandDataBuffer canonical = data;
 		if (!callback_index.has_value() || !NormalizeNativeCommand(command, *callback_index, canonical, _network_own_client_id)) throw std::runtime_error("blocked");

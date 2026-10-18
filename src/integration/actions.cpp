@@ -264,6 +264,7 @@ const Spec QUERIES[] = {
 	{"town.authority", {"town_id"}, {}},
 	{"goal.questions", {}, {"after_id", "after_generation", "limit"}},
 	{"goal.question", {"question_id"}, {"text_offset", "text_limit"}},
+	{"news.custom", {}, {"after", "limit"}},
 	{"story.pages", {}, {"book_company_id", "after_id", "limit"}},
 	{"story.elements", {"page_id"}, {"after_id", "limit", "text_offset", "text_limit"}},
 	{"story.element", {"element_id"}, {"text_offset", "text_limit"}},
@@ -310,6 +311,13 @@ Json EntityHandleSchema(uint32_t maximum)
    {"engine_instance_id", {{"type", "string"}, {"minLength", 1}, {"maxLength", 256}}}}}};
 }
 
+Json NewsCursorSchema(bool item = false)
+{
+	Json schema = EntityHandleSchema(0);
+	schema["properties"]["id"] = IntegerSchema(item ? 1 : 0, INT64_MAX);
+	return schema;
+}
+
 /** One field schema source is used for capability publication and admission. */
 Json FieldSchema(const Spec &spec, std::string_view key)
 {
@@ -321,7 +329,8 @@ Json FieldSchema(const Spec &spec, std::string_view key)
  if (key == "book_company_id") return {{"anyOf", Json::array({IntegerSchema(0, MAX_COMPANIES - 1), Json{{"type", "null"}}})}};
  if (key == "text_offset") return IntegerSchema(0, INT32_MAX);
  if (key == "text_limit") return IntegerSchema(1, 8192);
- if (key == "limit" && (name.starts_with("story.") || name == "goal.questions")) return IntegerSchema(1, 32);
+ if (key == "limit" && (name.starts_with("story.") || name == "goal.questions" || name == "news.custom")) return IntegerSchema(1, 32);
+ if (key == "after" && name == "news.custom") return NewsCursorSchema();
  if (key == "after_id" && name == "goal.questions") return IntegerSchema(-1, 65535);
  if (key == "after_generation" && name == "goal.questions") return {{"type", "integer"}, {"minimum", 0}, {"maximum", UINT64_MAX}};
  if (key == "after_subtype") return IntegerSchema(-1, 254);
@@ -337,7 +346,7 @@ Json FieldSchema(const Spec &spec, std::string_view key)
  if (key == "after_byte") return {{"type", "integer"}, {"minimum", 0}, {"maximum", UINT64_MAX}};
  if (key == "expected_content_version") return {{"type", "string"}, {"minLength", 64}, {"maxLength", 64}};
  if (key == "limit" && name == "display.text") return IntegerSchema(1, 2048);
- if (key == "kind" && name == "display.text") return EnumSchema({"town_text", "cargo_name", "subsidy_cargo_name", "subsidy_source_name", "subsidy_destination_name", "league_table_title", "league_table_header", "league_table_footer", "league_entry_text", "league_entry_score", "goal_text", "goal_progress", "industry_cargo_line", "industry_extra_text", "industry_custom_text", "industry_name", "vehicle_refit_label"});
+ if (key == "kind" && name == "display.text") return EnumSchema({"town_text", "cargo_name", "subsidy_cargo_name", "subsidy_source_name", "subsidy_destination_name", "league_table_title", "league_table_header", "league_table_footer", "league_entry_text", "league_entry_score", "goal_text", "goal_progress", "industry_cargo_line", "industry_extra_text", "industry_custom_text", "industry_name", "vehicle_refit_label", "news_custom_text"});
  if (key == "consist_version") return {{"type", "string"}, {"minLength", 68}, {"maxLength", 68}};
  if (key == "after_part_position") return IntegerSchema(-1, 4095);
  if (key == "part_limit") return IntegerSchema(1, 16);
@@ -499,6 +508,7 @@ Json ParameterSchema(const Spec &spec)
    variants.push_back(std::move(value));
   };
   add_offsets(branch({"cargo_id"}, {"target", "vehicle_id", "subtype", "direction", "slot"}, {{"kind", singleton("cargo_name")}}));
+  add_offsets(branch({"target"}, {"cargo_id", "vehicle_id", "subtype", "direction", "slot"}, {{"kind", singleton("news_custom_text")}, {"target", NewsCursorSchema(true)}}));
   add_offsets(branch({"target"}, {"cargo_id", "vehicle_id", "subtype", "direction", "slot"}, {{"kind", EnumSchema({"town_text", "league_entry_text", "league_entry_score", "goal_text", "goal_progress", "industry_extra_text", "industry_custom_text", "industry_name"})}, {"target", EntityHandleSchema(63999)}}));
   add_offsets(branch({"target"}, {"cargo_id", "vehicle_id", "subtype", "direction", "slot"}, {{"kind", EnumSchema({"subsidy_cargo_name", "subsidy_source_name", "subsidy_destination_name"})}, {"target", EntityHandleSchema(255)}}));
   add_offsets(branch({"target"}, {"cargo_id", "vehicle_id", "subtype", "direction", "slot"}, {{"kind", EnumSchema({"league_table_title", "league_table_header", "league_table_footer"})}, {"target", EntityHandleSchema(254)}}));
@@ -1758,6 +1768,7 @@ Json CapabilityMatrix()
 			else if (name == "company.valuation") for (const char *field : {"company", "company_value"}) fields.push_back(field);
 			else if (name == "vehicle.refit_subtypes") for (const char *field : {"vehicle_id", "part_id", "cargo_id", "refittable", "current_cargo", "keep_option", "subtypes", "next_after_subtype", "complete", "probe_cap_reached"}) fields.push_back(field);
 			else if (name == "goal.questions") for (const char *field : {"items", "next_after_id", "next_after_generation"}) fields.push_back(field);
+			else if (name == "news.custom") for (const char *field : {"history_scope", "history_start", "latest", "gap", "items", "next", "complete"}) fields.push_back(field);
 			else if (name == "display.text") for (const char *field : {"kind", "target", "cargo_id", "direction", "slot", "vehicle_id", "subtype", "text", "content_version", "total_bytes", "next_after_byte"}) fields.push_back(field);
 			else if (name == "industry.details") for (const char *field : {"industry_id", "name", "name_truncated", "industry_type", "location", "width", "height", "nearest_town", "announced_closure", "period_unit", "accepted_cargo_ids", "produced_cargo", "accepted", "produced", "omitted_presentation"}) fields.push_back(field);
 			else if (name == "industry.monthly_stats") for (const char *field : {"industry_id", "cargo_id", "direction", "period_unit", "points"}) fields.push_back(field);
@@ -1789,7 +1800,7 @@ Json CapabilityMatrix()
 	for (const auto &spec : ACTIONS) actions.push_back(describe(spec, false));
 	for (const auto &spec : QUERIES) queries.push_back(describe(spec, true));
 	return {{"version", 1}, {"actions", std::move(actions)}, {"queries", std::move(queries)},
-		{"limits", {{"region_width", 64}, {"region_height", 64}, {"map_page_items", 100}, {"map_page_bytes", 40960}, {"page_items", 256}, {"page_scanned_slots", 4096}, {"vehicle_parts_per_page", 256}, {"order_page_items", 64}, {"shared_member_page_items", 64}, {"order_cohort_members", NATIVE_MAX_SHARED_VEHICLES}, {"group_page_items", 100}, {"manager_face_page_items", 16}, {"native_operation_state_bytes", 16384}, {"construction_extent", MAX_MAP_SIZE}, {"construction_area", 4096}, {"station_extent", NATIVE_MAX_STATION_EXTENT}, {"consist_parts", NATIVE_MAX_CONSIST_PARTS}, {"native_spatial_tiles", NATIVE_MAX_SPATIAL_TILES}, {"terrain_level_area", 1024}, {"display_text_chunk_bytes", 2048}, {"text_refit_interval_ms", 1000}, {"estimate_interval_ms", 1000}, {"estimate_result_bytes", 4096}, {"control_reference_scan_interval_ms", 1000}, {"valuation_interval_ms", 1000}, {"station_waiting_interval_ms", 1000}, {"station_site_interval_ms", 1000}, {"station_site_name_bytes", 64}, {"refit_subtype_page_items", 16}, {"station_waiting_page_items", 64}}},
+		{"limits", {{"region_width", 64}, {"region_height", 64}, {"map_page_items", 100}, {"map_page_bytes", 40960}, {"page_items", 256}, {"page_scanned_slots", 4096}, {"vehicle_parts_per_page", 256}, {"order_page_items", 64}, {"shared_member_page_items", 64}, {"order_cohort_members", NATIVE_MAX_SHARED_VEHICLES}, {"group_page_items", 100}, {"manager_face_page_items", 16}, {"native_operation_state_bytes", 16384}, {"construction_extent", MAX_MAP_SIZE}, {"construction_area", 4096}, {"station_extent", NATIVE_MAX_STATION_EXTENT}, {"consist_parts", NATIVE_MAX_CONSIST_PARTS}, {"native_spatial_tiles", NATIVE_MAX_SPATIAL_TILES}, {"terrain_level_area", 1024}, {"display_text_chunk_bytes", 2048}, {"text_refit_interval_ms", 1000}, {"estimate_interval_ms", 1000}, {"estimate_result_bytes", 4096}, {"control_reference_scan_interval_ms", 1000}, {"valuation_interval_ms", 1000}, {"station_waiting_interval_ms", 1000}, {"station_site_interval_ms", 1000}, {"station_site_name_bytes", 64}, {"refit_subtype_page_items", 16}, {"station_waiting_page_items", 64}, {"custom_news_rows", 1024}, {"custom_news_encoded_bytes", 4194304}, {"custom_news_item_encoded_bytes", 65536}, {"custom_news_page_rows", 32}}},
 		{"conventions", {{"directions", {"NE", "SE", "SW", "NW"}}, {"entity_handles", "id, generation and opaque engine_instance_id are required; refresh handles after an engine restart; world epoch is required in the bridge envelope"},
 			{"tiles", "native tile index or x/y map coordinates"}, {"removal", "terrain.clear demolishes depots, airports, docks, locks, canals and other removable tiles under normal gameplay rules"},
 			{"station_creation", "Omitting station_id selects a new station; reusing an active or gray station requires its handle. adjacent=false permits the normal adjacent-station joining search."},
@@ -1799,6 +1810,7 @@ Json CapabilityMatrix()
 			{"pagination", "next_after_id is the last examined pool slot; pages may be empty before the end of a sparse pool"},
 			{"map_pagination", "map.region uses live row-major pages: repeat the same region with after_offset=next_after_offset until complete=true. Each page has its own page_tick; pages do not form an atomic snapshot."},
 			{"bulk_actions", "Larger areas and bulk fleet operations compose individual ordinary actions. Each action has its own outcome; partial completion is possible."},
+			{"custom_news", "news.custom is recipient-scoped current-boot custom GS news metadata. Select one news_id with display.text kind news_custom_text; encoded input is retained, visible text uses live native names/language. Cursors bind the company incarnation. References are historical. Retention loss sets gap. No hard per-render work bound."},
 			{"question_pagination", "goal.questions returns paired next_after_id and next_after_generation cursors. Omitting after_generation preserves legacy whole-ID skipping. Client-private prompts belong only to the actual native client window."},
 			{"observation_intervals", "Text rendering, refit probing, station coverage, linear control-reference selectors and order/page control tokens share one process-global admission interval. Valuation and station waiting have separate process-global intervals. Each admitted call may exceed the cooperative tick slice."},
 			{"station_site", "Selected loaded rail/road specifications and normal extent64 use native QueryCost feasibility and GUI rectangular coverage. Coverage callback PSA writes are query-local. Cargo name previews are plain UTF-8 at most64bytes with name_truncated; full labels use display.text. Admission bounds starts, not callback latency or temporary string expansion. Joined coverage and irregular airport tiles are excluded."},

@@ -9,6 +9,7 @@
 
 #include "../stdafx.h"
 #include "actions_internal.h"
+#include "actions_story.h"
 #include "../cargotype.h"
 #include "../company_base.h"
 #include "../company_func.h"
@@ -521,7 +522,11 @@ Json DisplayText(const Json &parameters)
 	} else {
 		CheckDisplayTextKeys(parameters, {"target"});
 		if (!parameters.contains("target")) throw InvalidParameters("Display text target is missing");
-		if (kind == "town_text") {
+		if (kind == "news_custom_text") {
+			const EncodedString *text = &CustomNewsText(parameters.at("target"));
+			reference = {{"target", parameters.at("target")}};
+			render = [text]() { return text->GetDecodedString(); };
+		} else if (kind == "town_text") {
 			const Town *town = CheckedHandle<Town, 64000>(parameters, "target");
 			reference = {{"target", Handle(town)}};
 			render = [town]() { return town->text.GetDecodedString(); };

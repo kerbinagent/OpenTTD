@@ -114,6 +114,8 @@ public:
 
 	inline void clear() { this->string.clear(); }
 	inline bool empty() const { return this->string.empty(); }
+	/** Owned encoded bytes; does not format, copy or resolve any arguments. */
+	size_t GetEncodedSize() const { return this->string.size(); }
 
 private:
 	std::string string; ///< The encoded string.

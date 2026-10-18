@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -27,6 +28,8 @@ class FakeEngine:
                              "action_sequence": 7, "tick": 12}
         self.on_submit = None
         self.hello_role = "world"
+        self.recovery_required = False
+        self.pause = {"paused": False, "reasons": [], "command_policy": "no_actions", "revision": 0}
         self.hello_reply_override = None
         self.hello_error = None
         self.hello_capabilities = {
@@ -49,6 +52,8 @@ class FakeEngine:
             "role": self.hello_role,
             "engine_instance_id": self.instances.get(world_id, "boot"),
             "world_epoch": "initial",
+            "recovery_required": self.recovery_required,
+            "pause": copy.deepcopy(self.pause),
             "native_max_lag_ticks": 100,
             "capabilities": copy.deepcopy(self.hello_capabilities),
         }}
@@ -268,6 +273,48 @@ class ServiceTests(unittest.TestCase):
         return self.service._process_record(
             principal, self.store.get_request(principal, request_id)
         )
+
+    def test_world_status_is_shared_and_cursor_precedes_fresh_hello(self):
+        visual_token = self.store.provision("w1", "viewer", 2, mode="visual")
+        self.engine.pause = {"paused": True, "reasons": ["manual"],
+                             "command_policy": "no_construction", "revision": 7,
+                             "private_tick": 999}
+        expected = {"world_id": "w1", "world_epoch": "initial", "engine_instance_id": "boot",
+                    "pause": {"paused": True, "reasons": ["manual"],
+                              "command_policy": "no_construction", "revision": 7}}
+        for token in (self.token, visual_token):
+            code, current = self.service.handle("GET", "/v1/world/status", token)
+            self.assertEqual(code, 200)
+            self.assertEqual({k: v for k, v in current.items() if k != "event_cursor"}, expected)
+            self.assertIsInstance(current["event_cursor"], str)
+            self.assertEqual(self.service.handle("GET", "/v1/capabilities", token)[1]["world_status"],
+                             {"endpoint": "/v1/world/status", "event": "world.status"})
+
+        before = self.store.current_event_cursor(self.principal)
+        original = self.engine.call
+        def racing_hello(envelope):
+            if envelope["type"] == "hello":
+                writer = threading.Thread(target=lambda: self.store.append_event(self.principal, "example", {}))
+                writer.start()
+                writer.join(timeout=1)
+                self.assertFalse(writer.is_alive(), "Status RPC held the Store lock")
+            return original(envelope)
+        with patch.object(self.engine, "call", side_effect=racing_hello):
+            _, current = self.service.handle("GET", "/v1/world/status", self.token)
+        self.assertEqual(current["event_cursor"], before)
+        self.assertEqual([event["type"] for event in self.store.events(self.principal, after=before)["events"]], ["example"])
+
+    def test_world_status_refuses_recovery_and_malformed_native_pause(self):
+        self.engine.recovery_required = True
+        self.assert_code("world_recovering", lambda: self.service.handle("GET", "/v1/world/status", self.token))
+        self.engine.recovery_required = False
+        self.engine.pause = {"paused": "false", "reasons": [], "command_policy": "no_actions", "revision": 0}
+        self.assert_code("world_status_unavailable", lambda: self.service.handle("GET", "/v1/world/status", self.token))
+        self.assertNotIn("world_status", self.service.handle("GET", "/v1/capabilities", self.token)[1])
+        self.store.begin_recovery("w1", "boot-new")
+        hellos = self.engine.count("hello")
+        self.assert_code("world_recovering", lambda: self.service.handle("GET", "/v1/world/status", self.token))
+        self.assertEqual(self.engine.count("hello"), hellos)
 
     def test_action_admission_is_fast_idempotent_and_rejects_body_actor(self):
         self.assert_code("invalid_request", lambda: self.service.handle(

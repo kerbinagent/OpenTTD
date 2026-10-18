@@ -47,6 +47,8 @@ def runtime_fingerprints(binary):
 class LifecycleWorld(LiveWorld):
     """Keep the fixture runner from accidentally bypassing the public API."""
 
+    allowed_console_commands = frozenset({"unpause", "quit"})
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.private_calls = []
@@ -58,7 +60,7 @@ class LifecycleWorld(LiveWorld):
         return super().rpc(kind, **fields)
 
     def console(self, command):
-        if command not in {"unpause", "quit"}:
+        if command not in self.allowed_console_commands:
             raise AssertionError(f"Fixture test forbids console gameplay command {command}")
         return super().console(command)
 

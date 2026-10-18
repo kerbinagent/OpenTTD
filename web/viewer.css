@@ -310,6 +310,18 @@ a {
 .status-label.ready {
   color:var(--teal);
 }
+.world-state {
+  padding:9px 16px;
+  border-bottom:1px solid var(--line);
+  font-size:11px;
+  color:var(--muted);
+}
+.world-state strong {
+  display:block;
+  font-weight:650;
+}
+.world-state .ready { color:var(--teal); }
+.world-state .paused { color:var(--amber); }
 .game-stage {
   height:clamp(310px,52vh,680px);
   background:#0b1113;

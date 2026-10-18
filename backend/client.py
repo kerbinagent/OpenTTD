@@ -103,6 +103,10 @@ class BackendClient:
         except HTTPError as exc:
             raise self._error(exc) from None
 
+    def world_status(self) -> dict:
+        """Read the current shared pause snapshot and its event cursor."""
+        return self.request("GET", "/v1/world/status")
+
     def image(self, image_id: str) -> bytes:
         """Fetch one authenticated PNG without exposing a credential in its URL."""
         if not isinstance(image_id, str) or _IMAGE_ID.fullmatch(image_id) is None:

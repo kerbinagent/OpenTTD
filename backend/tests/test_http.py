@@ -143,12 +143,13 @@ class HTTPTest(unittest.TestCase):
         previous = http._WEB_ROOT
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ("index.html", "viewer.js", "viewer.css", "events.mjs"):
+            for name in ("index.html", "viewer.js", "viewer.css", "events.mjs", "world-status.mjs"):
                 (root / name).write_text(name, encoding="utf-8")
             http._WEB_ROOT = root
             try:
                 for path, name in (("/", "index.html"), ("/viewer.js", "viewer.js"),
-                                   ("/viewer.css", "viewer.css"), ("/events.mjs", "events.mjs")):
+                                   ("/viewer.css", "viewer.css"), ("/events.mjs", "events.mjs"),
+                                   ("/world-status.mjs", "world-status.mjs")):
                     with self.subTest(path=path):
                         status, body = self.fetch(path)
                         self.assertEqual((status, body), (200, name))

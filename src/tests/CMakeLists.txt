@@ -15,6 +15,7 @@ add_test_files(
     string_consumer.cpp
     string_inplace.cpp
     string_func.cpp
+    test_strings_news_safety.cpp
     test_main.cpp
     test_network_crypto.cpp
     test_script_admin.cpp
@@ -32,7 +33,9 @@ if(OPTION_INTEGRATION)
         test_integration_company_settings_registry.cpp
         test_integration_company_settings_gui.cpp
         test_integration_decisions.cpp
+        test_integration_pause.cpp
         test_integration_story.cpp
+        test_integration_custom_news.cpp
         test_integration_story_startup.cpp
         test_integration_reports.cpp
         test_integration_quota.cpp

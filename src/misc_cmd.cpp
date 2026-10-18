@@ -22,6 +22,9 @@
 #include "texteff.hpp"
 #include "misc_cmd.h"
 #include "video/video_driver.hpp"
+#ifdef WITH_INTEGRATION
+#include "integration/bridge_hooks.h"
+#endif
 
 #include "table/strings.h"
 
@@ -205,6 +208,9 @@ CommandCost CmdPause(DoCommandFlags flags, PauseMode mode, bool pause)
 			}
 
 			NetworkHandlePauseChange(prev_mode, mode);
+#ifdef WITH_INTEGRATION
+			Integration::PauseChanged();
+#endif
 
 			/* Screensaver should always be inhibited unless we're paused. */
 			VideoDriver::GetInstance()->SetScreensaverInhibited(_pause_mode.None());

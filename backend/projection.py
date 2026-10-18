@@ -31,6 +31,9 @@ _CONTROL_REFERENCE_IDS = {
 }
 _ORDER_VERSION = re.compile(r"ov1:[0-9A-Fa-f]{64}\Z")
 _PAGE_VERSION = re.compile(r"spv1:[0-9A-Fa-f]{64}\Z")
+_PAUSE_REASONS = ("manual", "saving_loading", "joining", "error",
+                  "insufficient_clients", "game_script", "link_graph", "other")
+_PAUSE_POLICIES = ("no_actions", "no_construction", "no_landscaping", "all_actions")
 _PERSON = {"identity_id": str, "company_id": (int, str), "kind": str, "display_name": str}
 _CHAT = {
     "id": str, "message_id": str, "thread_id": str, "scope": str,
@@ -149,7 +152,7 @@ _DISPLAY_TEXT_TARGET_KINDS = frozenset({
     "subsidy_destination_name", "league_table_title", "league_table_header",
     "league_table_footer", "league_entry_text", "league_entry_score",
     "goal_text", "goal_progress", "industry_extra_text",
-    "industry_name", "industry_custom_text",
+    "industry_name", "industry_custom_text", "news_custom_text",
 })
 _DISPLAY_TEXT_REFERENCE_FIELDS = frozenset({
     "target", "vehicle_id", "cargo_id", "subtype", "direction", "slot",
@@ -160,6 +163,20 @@ _DISPLAY_TEXT = {
     "direction": str, "slot": int,
     "text": str, "content_version": str, "total_bytes": int,
     "next_after_byte": _NULLABLE_INT,
+}
+_NEWS_CURSOR = _HANDLE
+_NEWS_LOCATION = {"x": int, "y": int}
+_NEWS_REFERENCE = {"anyOf": [type(None), {
+    "kind": str, "location": {"anyOf": [_NEWS_LOCATION, type(None)]},
+    "target": _HANDLE, "engine_id": int,
+}]}
+_NEWS_CUSTOM = {
+    **_QUERY_BASE, "history_scope": str, "history_start": _NEWS_CURSOR,
+    "latest": _NEWS_CURSOR, "gap": bool,
+    "items": [{"news_id": _NEWS_CURSOR, "issued_tick": int,
+               "calendar_date": {"year": int, "month": int, "day": int},
+               "news_type": str, "reference": _NEWS_REFERENCE}],
+    "next": _NEWS_CURSOR, "complete": bool,
 }
 _WORLD_DATE = {"date_day": int, "year": int, "month": int, "day": int, "day_fraction": int}
 _WORLD = {
@@ -591,6 +608,7 @@ _QUERY_FIELDS = {
     "industries": {**_QUERY_BASE, "items": [_INDUSTRY], "next_after_id": (int, type(None))},
     "industry.details": _INDUSTRY_DETAILS,
     "industry.monthly_stats": _INDUSTRY_MONTHLY_STATS,
+    "news.custom": _NEWS_CUSTOM,
     "display.text": _DISPLAY_TEXT,
 }
 _LEGACY_QUERY = {**_QUERY_BASE, "vehicles": [_VEHICLE], "stations": [_STATION],
@@ -650,6 +668,31 @@ def positive(value, shape, depth=0):
 
 def _fields(spec, vocabulary):
     return {key: vocabulary[key] for key in spec.get("result_fields", ()) if key in vocabulary}
+
+
+def _news_reference(value):
+    """Keep only the historical reference variant selected by native kind."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return _DROP
+    kind = value.get("kind")
+    if kind == "tile":
+        location = value.get("location")
+        if not isinstance(location, dict) or set(location) != {"x", "y"}:
+            return _DROP
+        return {"kind": kind, "location": location}
+    if kind in ("town", "industry", "station", "vehicle"):
+        target = value.get("target")
+        location = value.get("location", _DROP)
+        if (not isinstance(target, dict) or set(target) != set(_HANDLE) or
+                not (location is None or isinstance(location, dict) and
+                     set(location) == {"x", "y"})):
+            return _DROP
+        return {"kind": kind, "target": target, "location": location}
+    if kind == "engine" and type(value.get("engine_id")) is int:
+        return {"kind": kind, "engine_id": value["engine_id"]}
+    return _DROP
 
 
 def _bounded_feedback(value, maximum):
@@ -762,6 +805,34 @@ def estimate(value):
     return result
 
 
+def world_status(pause):
+    """Project only finite, boot-qualified native pause facts."""
+    def unavailable():
+        raise ServiceError("world_status_unavailable", status=503)
+
+    if not isinstance(pause, dict):
+        unavailable()
+    paused = pause.get("paused")
+    reasons = pause.get("reasons")
+    policy = pause.get("command_policy")
+    revision = pause.get("revision")
+    if (type(paused) is not bool or type(reasons) is not list or
+            len(reasons) > len(_PAUSE_REASONS) or
+            type(policy) is not str or policy not in _PAUSE_POLICIES or
+            type(revision) is not int or not 0 <= revision <= 0xFFFFFFFFFFFFFFFF):
+        unavailable()
+    positions = []
+    for reason in reasons:
+        if type(reason) is not str or reason not in _PAUSE_REASONS:
+            unavailable()
+        positions.append(_PAUSE_REASONS.index(reason))
+    if (positions != sorted(set(positions)) or paused != bool(reasons) or
+            ("other" in reasons and len(reasons) != 1)):
+        unavailable()
+    return {"paused": paused, "reasons": list(reasons),
+            "command_policy": policy, "revision": revision}
+
+
 def observation(value, spec=None, query_name=None, *, parameters=None):
     if isinstance(spec, str) and query_name is None:
         query_name, spec = spec, None
@@ -795,6 +866,14 @@ def observation(value, spec=None, query_name=None, *, parameters=None):
             for key in _DISPLAY_TEXT_REFERENCE_FIELDS - references:
                 fields.pop(key, None)
         result = positive(value, fields)
+        if query_name == "news.custom" and isinstance(result, dict):
+            for row in result.get("items", ()):
+                if "reference" in row:
+                    reference = _news_reference(row["reference"])
+                    if reference is _DROP:
+                        row.pop("reference")
+                    else:
+                        row["reference"] = reference
         if query_name == "vehicle.refit_subtypes" and isinstance(result, dict):
             subtypes = result.get("subtypes")
             if isinstance(subtypes, list):

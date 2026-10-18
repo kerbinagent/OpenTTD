@@ -22,12 +22,14 @@ bool TracksPlayerPresentations();
 bool RendererIsActive();
 bool RendererCaptureCommandIntent(Commands command, StringID error, CompanyID company, const CommandDataBuffer &data);
 bool RendererCaptureNativeCommand(Commands command, StringID error, CommandCallback *callback, CompanyID company, const CommandDataBuffer &data);
+/** Observe shared pause facts after native execution; does not initialize IPC. */
+void PauseChanged();
 
 /** Server-local correlation only. Never serialized to native clients. */
 uint64_t SubmissionToken();
 void CommandQueued(uint64_t token);
 void CommandPostTestFailed(Commands command, const CommandCost &cost);
-bool ValidateQueuedCommand(uint64_t token);
+bool ValidateQueuedCommand(uint64_t token, Commands command);
 void BeginCommand(uint64_t token);
 void EndCommand();
 /** Exact text presentation selected by the executing request; no new answer state. */

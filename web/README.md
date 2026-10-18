@@ -13,6 +13,7 @@ Serve these exact routes from the same origin as the API:
 | `/viewer.css` | `web/viewer.css` | `text/css; charset=utf-8` |
 | `/viewer.js` | `web/viewer.js` | `text/javascript; charset=utf-8` |
 | `/events.mjs` | `web/events.mjs` | `text/javascript; charset=utf-8` |
+| `/world-status.mjs` | `web/world-status.mjs` | `text/javascript; charset=utf-8` |
 
 Do not expose a generic repository file server. The tests and this document do
 not need HTTP routes. The backend owns authentication, authorization and image
@@ -23,6 +24,11 @@ keeps it in tab memory only; it never places credentials in URLs or storage.
 
 - `GET /v1/me` supplies the authenticated display name, identity, company and
   immutable run mode. `GET /v1/capabilities` supplies service availability.
+- `GET /v1/world/status` supplies the shared world/epoch/engine fence, current
+  pause state, reasons, native command policy, revision and an `event_cursor`.
+  Both run modes see the same read-only indicator. It adds no pause or speed
+  controls. A failed fresh status read displays unavailable; backend chat can
+  continue while the native world is recovering.
 - `GET /v1/participants` returns `{participants: [...]}` with safe labels:
   `identity_id`, `display_name`, `kind`, `company_id`, optional `company_name` and
   `presence`. It does not carry structured game observations.
@@ -44,6 +50,17 @@ keeps it in tab memory only; it never places credentials in URLs or storage.
   unauthenticated `EventSource` URL. Independent history refresh reconciles
   chat when a transport reconnects.
 
+The viewer gets fresh world status before each stream connection. Ordinary
+same-world reconnects retain the last shared SSE cursor, preserving unread chat
+and message tick updates. Initial connections, expired cursors, changed engine
+or epoch, and `world.status` history gaps use a fresh snapshot cursor after an
+immediate thread/history refresh. History keeps its separate pagination cursor
+and continues catching up on the normal refresh timer, including backlogs over
+five pages. Message IDs reconcile history with live delivery. Same-fence pause
+events at or below the current revision are ignored. Revisions use exact uint64
+comparison; older browsers lacking JSON reviver source support fail closed for
+values above their safe integer range.
+
 Capture/control work is serialized. Automatic images are requested at most
 once per second while visible, with a slower retry after errors. Inspection
 uses the actual displayed image rectangle and intrinsic dimensions. History
@@ -57,9 +74,14 @@ No dependency installation or build step is needed:
 ```sh
 node --check web/viewer.js
 node --check web/events.mjs
-node --test web/events.test.mjs
+node --check web/world-status.mjs
+node --test web/events.test.mjs web/world-status.test.mjs web/viewer.test.mjs
 ```
 
 The parser tests cover multiline SSE data, every CRLF split position, IDs,
 incomplete events and bounded buffering. Real browser and native-renderer
-integration checks require the running same-origin world service.
+integration checks require the running same-origin world service. The status
+tests cover finite DTO validation, exact revision comparison, fence/gap recovery
+and cursor selection. The viewer tests execute its actual async stream/history
+flow against a small DOM/fetch boundary, including chat cursor continuity and
+pagination beyond five pages.

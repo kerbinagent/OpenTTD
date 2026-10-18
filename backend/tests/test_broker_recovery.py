@@ -8,6 +8,7 @@ import copy
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from backend.errors import ServiceError
 from backend.checkpoint import CheckpointPolicy
@@ -31,6 +32,8 @@ class WireEngine:
         self.roster = []
         self.pending_chat = []
         self.event_pages = {}
+        self.pause = {"paused": False, "reasons": [], "command_policy": "no_actions", "revision": 0}
+        self.include_pause = True
         self.wrong_world = False
         self.chat_status = "completed"
         self.finish_faults = []
@@ -50,6 +53,8 @@ class WireEngine:
             result = {"engine_instance_id": self.instance, "world_epoch": "initial",
                       "role": "world", "recovery_required": self.recovery_required,
                       "capabilities": copy.deepcopy(self.capabilities)}
+            if self.include_pause:
+                result["pause"] = copy.deepcopy(self.pause)
         elif kind == "checkpoint.status":
             result = dict(self.checkpoint, recovery_required=self.recovery_required)
             status = self.checkpoint_status_reply_status
@@ -718,8 +723,8 @@ class BrokerRecoveryTests(unittest.TestCase):
     def test_private_event_is_quarantined_and_later_cursor_advances(self):
         self.recover()
         self.engine.event_pages[0] = {"events": [
-            {"event_id": 1, "type": "chat.message", "data": {"body": "private secret"}},
-            {"event_id": 2, "type": "action.completed", "result": {"ok": True}}],
+            {"event_id": 1, "engine_instance_id": "boot-1", "type": "chat.message", "data": {"body": "private secret"}},
+            {"event_id": 2, "engine_instance_id": "boot-1", "type": "action.completed", "result": {"ok": True}}],
             "cursor": 2, "gap": False, "oldest_event_id": 1}
         hello = self.service._hello(self.principal)
         self.service._poll_events(self.principal, hello)
@@ -728,9 +733,170 @@ class BrokerRecoveryTests(unittest.TestCase):
                                                    ("world-a",)).fetchone()[0]
             quarantined = self.store.connection.execute("SELECT COUNT(*) FROM broker_quarantine").fetchone()[0]
         self.assertEqual((offset, quarantined), (2, 1))
-        self.assertEqual(self.service.events(self.token)["events"], [])
+        self.assertEqual([event["type"] for event in self.service.events(self.token)["events"]], ["world.status"])
         self.service._poll_events(self.principal, hello)
         self.assertEqual(self.engine.calls_of("events.poll")[-1]["after"], 2)
+
+    def test_world_status_baseline_change_gap_and_new_instance(self):
+        self.recover()
+        visual_token = self.store.provision("world-a", "viewer", 2, mode="visual")
+        hello = self.service._hello(self.principal, refresh=True)
+        self.service._poll_events(self.principal, hello)
+        for token in (self.token, visual_token):
+            page = self.service.events(token)
+            self.assertEqual([event["type"] for event in page["events"]], ["world.status"])
+            self.assertEqual(page["events"][0]["data"], {
+                "world_id": "world-a", "world_epoch": "initial", "engine_instance_id": "boot-1",
+                "pause": self.engine.pause, "baseline": True})
+
+        changed = {"paused": True, "reasons": ["manual"], "command_policy": "no_actions", "revision": 1}
+        self.engine.pause = copy.deepcopy(changed)
+        self.engine.event_pages[0] = {"events": [{"event_id": 1, "engine_instance_id": "boot-1",
+            "type": "world.status", "tick": 1234, "secret": "private", "data": {"pause": dict(changed, raw_flags=255)}}],
+            "cursor": 1, "gap": False, "oldest_event_id": 1}
+        self.service._poll_events(self.principal, hello)
+        self.service._poll_events(self.principal, hello)  # Same native page cannot append twice.
+        for token in (self.token, visual_token):
+            data = [event["data"] for event in self.service.events(token)["events"]]
+            self.assertEqual(len(data), 2)
+            self.assertEqual(data[1], {"world_id": "world-a", "world_epoch": "initial",
+                                       "engine_instance_id": "boot-1", "pause": changed})
+            self.assertNotIn("tick", str(data))
+            self.assertNotIn("private", str(data))
+
+        newer = {"paused": True, "reasons": ["saving_loading"], "command_policy": "all_actions", "revision": 3}
+        self.engine.pause = copy.deepcopy(newer)
+        self.engine.event_pages[1] = {"events": [{"event_id": 500, "engine_instance_id": "boot-1",
+            "type": "world.status", "data": {"pause": dict(changed, revision=2)}}],
+            "cursor": 500, "gap": True, "oldest_event_id": 500}
+        self.service._poll_events(self.principal, hello)
+        data = [event["data"] for event in self.service.events(self.token)["events"]]
+        self.assertEqual(data[2]["pause"], newer)
+        self.assertEqual((data[2]["baseline"], data[2]["history_gap"]), (True, True))
+        self.assertEqual(data[3]["pause"]["revision"], 2)  # Clients ignore older same-boot revision.
+
+        self.engine.instance = "boot-2"
+        self.engine.pause = {"paused": False, "reasons": [], "command_policy": "no_actions", "revision": 0}
+        self.engine.event_pages[0] = {"events": [], "cursor": 0, "gap": False, "oldest_event_id": 1}
+        boot_hello = self.service._hello(self.principal, refresh=True)
+        self.service._poll_events(self.principal, boot_hello)
+        latest = self.service.events(self.token)["events"][-1]["data"]
+        self.assertEqual((latest["engine_instance_id"], latest["pause"]["revision"], latest["baseline"]),
+                         ("boot-2", 0, True))
+        self.assertTrue(latest["history_gap"])
+
+    def test_world_status_fanout_and_offset_roll_back_together(self):
+        self.recover()
+        visual_token = self.store.provision("world-a", "viewer", 2, mode="visual")
+        hello = self.service._hello(self.principal, refresh=True)
+        self.service._poll_events(self.principal, hello)
+        before = {token: self.store.current_event_cursor(self.store.authenticate(token))
+                  for token in (self.token, visual_token)}
+        changed = {"paused": True, "reasons": ["manual"], "command_policy": "no_actions", "revision": 1}
+        self.engine.event_pages[0] = {"events": [{"event_id": 1, "engine_instance_id": "boot-1",
+            "type": "world.status", "data": {"pause": changed}}],
+            "cursor": 1, "gap": False, "oldest_event_id": 1}
+        original = self.store.append_event_in_transaction
+        calls = 0
+        def fail_second(db, member, kind, payload):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("fail after first recipient")
+            return original(db, member, kind, payload)
+        with patch.object(self.store, "append_event_in_transaction", side_effect=fail_second):
+            with self.assertRaisesRegex(RuntimeError, "first recipient"):
+                self.service._poll_events(self.principal, hello)
+        with self.store.lock:
+            offset = self.store.connection.execute("SELECT cursor FROM broker_offsets WHERE world_id=?", ("world-a",)).fetchone()[0]
+        self.assertEqual(offset, 0)
+        for token in (self.token, visual_token):
+            member = self.store.authenticate(token)
+            self.assertEqual(self.store.events(member, after=before[token])["events"], [])
+        self.service._poll_events(self.principal, hello)
+        for token in (self.token, visual_token):
+            member = self.store.authenticate(token)
+            events = self.store.events(member, after=before[token])["events"]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["data"]["pause"], changed)
+
+    def test_world_status_gap_rejects_changed_fence_and_invalid_native_ids(self):
+        self.recover()
+        hello = self.service._hello(self.principal, refresh=True)
+        self.service._poll_events(self.principal, hello)
+        self.engine.event_pages[0] = {"events": [{"event_id": 8, "engine_instance_id": "boot-1",
+            "type": "world.status", "data": {"pause": self.engine.pause}}],
+            "cursor": 8, "gap": True, "oldest_event_id": 8}
+        original = self.engine.call
+        def restart_after_poll(request):
+            reply = original(request)
+            if request["type"] == "events.poll":
+                self.engine.instance = "boot-2"
+            return reply
+        with patch.object(self.engine, "call", side_effect=restart_after_poll):
+            with self.assertRaises(ServiceError):
+                self.service._poll_events(self.principal, hello)
+        with self.store.lock:
+            offset = self.store.connection.execute("SELECT cursor FROM broker_offsets WHERE world_id=?", ("world-a",)).fetchone()[0]
+        self.assertEqual(offset, 0)
+        self.engine.instance = "boot-1"
+        self.engine.event_pages[0]["events"][0]["event_id"] = True
+        with self.assertRaises(ServiceError):
+            self.service._poll_events(self.principal, hello)
+        self.assertEqual([event["type"] for event in self.service.events(self.token)["events"]], ["world.status"])
+
+    def test_malformed_world_status_is_quarantined_with_current_baseline(self):
+        self.recover()
+        hello = self.service._hello(self.principal, refresh=True)
+        self.service._poll_events(self.principal, hello)
+        self.engine.pause = {"paused": True, "reasons": ["manual"],
+                             "command_policy": "no_landscaping", "revision": 2}
+        self.engine.event_pages[0] = {"events": [{"event_id": 1, "engine_instance_id": "boot-1",
+            "type": "world.status", "data": {"pause": {"paused": "yes", "private": "hidden"}}}],
+            "cursor": 1, "gap": False, "oldest_event_id": 1}
+        self.service._poll_events(self.principal, hello)
+        public = [event["data"] for event in self.service.events(self.token)["events"]]
+        self.assertEqual(len(public), 2)
+        self.assertEqual(public[-1]["pause"], self.engine.pause)
+        self.assertEqual((public[-1]["baseline"], public[-1]["history_gap"]), (True, True))
+        self.assertNotIn("hidden", str(public))
+        with self.store.lock:
+            count = self.store.connection.execute("SELECT COUNT(*) FROM broker_quarantine").fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_old_compatible_hello_keeps_event_offset_without_pause_feature(self):
+        self.engine.include_pause = False
+        hello = self.recover()
+        with self.assertRaises(ServiceError) as unavailable:
+            self.service.handle("GET", "/v1/world/status", self.token)
+        self.assertEqual(unavailable.exception.status, 503)
+        self.assertNotIn("world_status", self.service.handle("GET", "/v1/capabilities", self.token)[1])
+        self.engine.event_pages[0] = {"events": [
+            {"event_id": 1, "engine_instance_id": "boot-1", "type": "action.completed"},
+            {"event_id": 2, "engine_instance_id": "boot-1", "type": "world.status",
+             "data": {"pause": {"paused": True, "reasons": ["manual"],
+                                "command_policy": "no_actions", "revision": 1}}}],
+            "cursor": 2, "gap": False, "oldest_event_id": 1}
+        self.service._poll_events(self.principal, hello)
+        with self.store.lock:
+            offset = self.store.connection.execute("SELECT cursor FROM broker_offsets WHERE world_id=?", ("world-a",)).fetchone()[0]
+            quarantine = self.store.connection.execute("SELECT COUNT(*) FROM broker_quarantine").fetchone()[0]
+        self.assertEqual((offset, quarantine), (2, 1))
+        self.assertEqual(self.service.events(self.token)["events"], [])
+
+        # A present but invalid pause field cannot silently downgrade to legacy.
+        self.engine.include_pause = True
+        self.engine.pause = {"paused": "yes"}
+        malformed = self.service._hello(self.principal, refresh=True)
+        with self.assertRaises(ServiceError) as unavailable:
+            self.service._poll_events(self.principal, malformed)
+        self.assertEqual(unavailable.exception.code, "world_status_unavailable")
+        with self.assertRaises(ServiceError) as unavailable:
+            self.service.handle("GET", "/v1/world/status", self.token)
+        self.assertEqual(unavailable.exception.code, "world_status_unavailable")
+        with self.store.lock:
+            still_offset = self.store.connection.execute("SELECT cursor FROM broker_offsets WHERE world_id=?", ("world-a",)).fetchone()[0]
+        self.assertEqual(still_offset, 2)
 
     def test_native_chat_uses_bare_roster_wrapped_pending_and_nested_ack(self):
         spy = NativeSocialSpy()

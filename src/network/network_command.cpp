@@ -466,7 +466,7 @@ void NetworkDistributeCommands()
 		if (queue.empty()) continue;
 		CommandPacket command = std::move(queue.front());
 		queue.erase(queue.begin());
-		if (Integration::ValidateQueuedCommand(command.integration_token)) {
+		if (Integration::ValidateQueuedCommand(command.integration_token, command.cmd)) {
 			NetworkClientSocket *owner = command.integration_owner == ClientID::Invalid ? nullptr : NetworkClientSocket::GetByClientID(command.integration_owner);
 			/* Validation and distribution run without yielding the simulation thread. */
 			assert(command.integration_owner == ClientID::Invalid || owner != nullptr);

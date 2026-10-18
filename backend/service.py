@@ -24,6 +24,8 @@ _ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _ACTION = re.compile(r"^[a-z][a-z0-9_.]{0,79}$")
 _NATIVE_KEY = re.compile(r"^[0-9a-fA-F]{64}$")
 _TERMINAL = {"completed", "rejected", "resolved_rolled_back"}
+_MAX_U64 = (1 << 64) - 1
+_MAX_SQLITE_INT = (1 << 63) - 1
 
 
 def _identifier(value):
@@ -61,6 +63,28 @@ def _catalog(value):
                 result[name] = {} if isinstance(spec, str) else spec
         return result
     return {}
+
+
+def _pause_from_hello(hello):
+    """Require a current, ready native pause snapshot before reporting it."""
+    if hello.get("recovery_required") is not False:
+        raise ServiceError("world_recovering", status=503)
+    return projection.world_status(hello.get("pause"))
+
+
+def _native_offset(value):
+    """SQLite INTEGER cannot hold the full unsigned native event range."""
+    if type(value) is int and 0 <= value <= _MAX_SQLITE_INT:
+        return value
+    if isinstance(value, str) and value.startswith("u") and 1 <= len(value[1:]) <= 20 and value[1:].isascii() and value[1:].isdigit():
+        number = int(value[1:])
+        if _MAX_SQLITE_INT < number <= _MAX_U64:
+            return number
+    raise ServiceError("engine_unavailable", status=503)
+
+
+def _stored_native_offset(value):
+    return value if value <= _MAX_SQLITE_INT else "u" + str(value)
 
 
 class Service:
@@ -302,6 +326,26 @@ class Service:
                     data = self.project_action(principal, self.store.get_request(principal, data["request_id"]))
                 except (ServiceError, KeyError):
                     continue
+            elif kind == "world.status":
+                if not isinstance(data, dict) or data.get("world_id") != principal.world_id:
+                    continue
+                try:
+                    if data.get("world_epoch") != self.store.world_epoch(principal.world_id):
+                        continue
+                    instance = data.get("engine_instance_id")
+                    if not isinstance(instance, str) or not 1 <= len(instance) <= 256:
+                        continue
+                    projected = {"world_id": principal.world_id, "world_epoch": data["world_epoch"],
+                                 "engine_instance_id": instance,
+                                 "pause": projection.world_status(data.get("pause"))}
+                    for marker in ("baseline", "history_gap"):
+                        if marker in data:
+                            if data[marker] is not True:
+                                raise ServiceError("world_status_unavailable", status=503)
+                            projected[marker] = True
+                    data = projected
+                except ServiceError:
+                    continue
             else:
                 continue
             events.append({"id": event["id"], "type": kind, "data": data})
@@ -323,6 +367,16 @@ class Service:
             return 200, {"identity_id": principal.identity_id, "world_id": principal.world_id,
                          "company_id": principal.company_id, "run_id": principal.run_id,
                          "mode": principal.mode, "kind": principal.kind, "display_name": principal.display_name}
+        if method == "GET" and route == ["world", "status"]:
+            _object(body, {})
+            if query:
+                raise ServiceError("invalid_request")
+            cursor = self.store.current_event_cursor(principal)
+            hello = self._hello(principal, refresh=True)
+            pause = _pause_from_hello(hello)
+            return 200, {"world_id": principal.world_id, "world_epoch": hello["world_epoch"],
+                         "engine_instance_id": hello["engine_instance_id"],
+                         "pause": pause, "event_cursor": cursor}
         if method == "GET" and route == ["participants"]:
             visible_handles = {}
             if principal.mode in ("text", "visual"):
@@ -358,7 +412,7 @@ class Service:
             return 200, {"participants": list(people.values())}
         if method == "GET" and route == ["capabilities"]:
             try:
-                self._hello(principal)
+                hello = self._hello(principal)
                 connected = True
             except ServiceError:
                 connected = False
@@ -379,6 +433,13 @@ class Service:
             estimate = self._estimate_capability(principal) if connected else None
             if estimate is not None:
                 result["action_estimate"] = estimate
+            if connected:
+                try:
+                    _pause_from_hello(hello)
+                except ServiceError:
+                    pass
+                else:
+                    result["world_status"] = {"endpoint": "/v1/world/status", "event": "world.status"}
             return 200, result
         if method == "POST" and route == ["view", "images"]:
             _object(body, {})
@@ -1137,25 +1198,95 @@ class Service:
                 {"rpc_type": "chat.publish", "message_id": entry["message_id"], "delivery": exact})
 
     def _poll_events(self, principal, hello):
+        pause_supported = "pause" in hello
+        if pause_supported:
+            projection.world_status(hello["pause"])  # Present but malformed is not a legacy authority.
         with self.store.lock:
             row = self.store.connection.execute("SELECT * FROM broker_offsets WHERE world_id=?", (principal.world_id,)).fetchone()
         instance = hello["engine_instance_id"]
-        after = row["cursor"] if row and row["engine_instance_id"] == instance else 0
+        first_instance_page = row is None or row["engine_instance_id"] != instance
+        after = _native_offset(row["cursor"]) if not first_instance_page else 0
         reply = self._rpc("events.poll", after=after, limit=128, engine_instance_id=instance)
         if reply.get("status") not in ("completed", "ok"):
             return
-        page = reply.get("result", {})
-        cursor = page.get("cursor", after)
-        if type(cursor) is not int or cursor < after:
+        if reply.get("engine_instance_id") != instance:
             raise ServiceError("engine_unavailable", status=503)
-        # Chat bodies are intentionally absent from this channel. Authoritative
-        # action results use action.status, so a bounded event gap is recoverable.
-        for index, event in enumerate(page.get("events", [])[:128]):
-            if not isinstance(event, dict) or event.get("type") not in ("action.completed", "checkpoint.complete", "world.status"):
-                with self.store.lock:
-                    self.store.connection.execute(
-                        "INSERT OR IGNORE INTO broker_quarantine VALUES(?,?,?,?)",
-                        (principal.world_id, instance, str(event.get("id", after + index) if isinstance(event, dict) else after + index), dumps(event)))
-                    self.store.connection.execute("DELETE FROM broker_quarantine WHERE rowid NOT IN (SELECT rowid FROM broker_quarantine ORDER BY rowid DESC LIMIT 128)")
-        with self.store.lock:
-            self.store.connection.execute("INSERT INTO broker_offsets VALUES(?,?,?) ON CONFLICT(world_id) DO UPDATE SET engine_instance_id=excluded.engine_instance_id,cursor=excluded.cursor", (principal.world_id, instance, cursor))
+        page = reply.get("result")
+        if not isinstance(page, dict):
+            raise ServiceError("engine_unavailable", status=503)
+        events, cursor, gap, oldest = (page.get("events"), page.get("cursor"),
+                                       page.get("gap"), page.get("oldest_event_id"))
+        if (not isinstance(events, list) or len(events) > 128 or type(cursor) is not int
+                or not after <= cursor <= _MAX_U64 or type(gap) is not bool
+                or type(oldest) is not int or not 1 <= oldest <= _MAX_U64):
+            raise ServiceError("engine_unavailable", status=503)
+        if (gap and (not events or oldest <= after + 1)) or (events and not gap and oldest > after + 1):
+            raise ServiceError("engine_unavailable", status=503)
+
+        public_events, quarantined = [], []
+        previous = after
+        malformed_status = False
+        for event in events:
+            if (not isinstance(event, dict) or type(event.get("event_id")) is not int
+                    or not previous < event["event_id"] <= cursor
+                    or event.get("engine_instance_id") != instance):
+                raise ServiceError("engine_unavailable", status=503)
+            previous = event["event_id"]
+            kind = event.get("type")
+            if kind == "world.status" and pause_supported:
+                data = event.get("data")
+                try:
+                    pause = projection.world_status(data.get("pause") if isinstance(data, dict) else None)
+                except ServiceError:
+                    malformed_status = True
+                    quarantined.append(event)
+                    continue
+                public_events.append({"world_id": principal.world_id, "world_epoch": hello["world_epoch"],
+                                      "engine_instance_id": instance, "pause": pause})
+            elif kind not in ("action.completed", "checkpoint.complete"):
+                quarantined.append(event)
+        if cursor != previous or (events and events[0]["event_id"] != max(after + 1, oldest)):
+            raise ServiceError("engine_unavailable", status=503)
+
+        baseline = pause_supported and (first_instance_page or gap or malformed_status)
+        baseline_event = None
+        if baseline:
+            fresh = self._hello(principal, refresh=True)  # Never hold SQLite across native RPC.
+            if (fresh["engine_instance_id"] != instance or fresh["world_epoch"] != hello["world_epoch"]):
+                raise ServiceError("world_recovering", status=503)
+            baseline_event = {"world_id": principal.world_id, "world_epoch": fresh["world_epoch"],
+                              "engine_instance_id": instance, "pause": _pause_from_hello(fresh),
+                              "baseline": True}
+            if gap or malformed_status or (row is not None and first_instance_page):
+                baseline_event["history_gap"] = True
+
+        # A cursor and all recipient fanout rows commit together. A retry sees
+        # either neither effect or both; native tick/private fields never fan out.
+        with self.store._transaction() as db:
+            world = db.execute("SELECT epoch,recovery_state FROM worlds WHERE id=?",
+                               (principal.world_id,)).fetchone()
+            if world is None or world["epoch"] != hello["world_epoch"] or world["recovery_state"] != "ready":
+                raise ServiceError("world_recovering", status=503)
+            current = db.execute("SELECT engine_instance_id,cursor FROM broker_offsets WHERE world_id=?",
+                                 (principal.world_id,)).fetchone()
+            if ((current is None) != (row is None) or
+                    (current is not None and (current["engine_instance_id"] != row["engine_instance_id"]
+                                              or _native_offset(current["cursor"]) != _native_offset(row["cursor"])))):
+                raise ServiceError("world_recovering", status=503)
+            recipients = [p for p in self.store.active_principals_for_world(principal.world_id)
+                          if p.mode in ("text", "visual")]
+            if baseline_event is not None:
+                for member in recipients:
+                    self.store.append_event_in_transaction(db, member, "world.status", baseline_event)
+            for data in public_events:
+                for member in recipients:
+                    self.store.append_event_in_transaction(db, member, "world.status", data)
+            for event in quarantined:
+                db.execute("INSERT OR IGNORE INTO broker_quarantine VALUES(?,?,?,?)",
+                           (principal.world_id, instance, str(event["event_id"]), dumps(event)))
+            if quarantined:
+                db.execute("DELETE FROM broker_quarantine WHERE rowid NOT IN "
+                           "(SELECT rowid FROM broker_quarantine ORDER BY rowid DESC LIMIT 128)")
+            db.execute("INSERT INTO broker_offsets VALUES(?,?,?) ON CONFLICT(world_id) "
+                       "DO UPDATE SET engine_instance_id=excluded.engine_instance_id,cursor=excluded.cursor",
+                       (principal.world_id, instance, _stored_native_offset(cursor)))
