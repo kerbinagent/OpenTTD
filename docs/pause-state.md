@@ -25,7 +25,10 @@ native state with no recognized functional reason. Native bookkeeping for a
 command executed during pause does not create another reason or notification.
 
 Policies are the native `no_actions`, `no_construction`, `no_landscaping` and
-`all_actions` levels. They describe the saved native policy. This policy
+`all_actions` levels. They describe the saved native policy **while `paused` is
+true**, rather than an always-active permission. For example, `paused:false`
+with `command_policy:"no_construction"` permits ordinary construction; do not
+wait for the configured policy string to change in an unpaused world. This policy
 cannot be changed during a network game; OpenTTD marks this setting
 `NoNetwork`. Choose it before hosting. Native company
 settings remain exceptions even under the `no_actions` label. Each actual

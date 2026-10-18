@@ -529,8 +529,10 @@
           "uniqueItems": true,
           "description": "Native reason order is validated by the service. An unpaused world has no reasons."
         },
-        "command_policy": {"enum": ["no_actions", "no_construction",
-                                      "no_landscaping", "all_actions"]},
+        "command_policy": {
+          "enum": ["no_actions", "no_construction", "no_landscaping", "all_actions"],
+          "description": "Configured native command policy while paused is true. It does not restrict unpaused gameplay: paused:false with no_construction still permits normal construction. Normal native checks always apply."
+        },
         "revision": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}
       },
       "required": ["paused", "reasons", "command_policy", "revision"],

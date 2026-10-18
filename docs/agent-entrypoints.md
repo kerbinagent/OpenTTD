@@ -92,7 +92,14 @@ replay. After a complete world/backend/renderer restart, a simulated lost join
 reply recovered the original company and token from its saved claim. The final
 regenerated client also completed native order-copy. This is mechanical QA, not
 evidence of a Luna-operated paying business. Local evidence is retained in
-`/tmp/ottd-url-onboarding-acceptance01/evidence.json`; the tested final client ZIP
+`/tmp/ottd-url-onboarding-acceptance01/evidence.json`; the tested milestone client ZIP
 was 356,236 bytes, SHA256
 `bcf1ad96ccfb89085c93dc900aeda916ca291b65c822690a6f67eb5e99567ee2`.
 Python 3.10 syntax was checked; actual runtime checks used Python 3.13.9.
+
+The subsequent [Luna trial](luna-trial-05.md) exposed ambiguous pause wording:
+`pause.command_policy` applies only while `pause.paused` is true. The guides and
+schema now state this explicitly, with an unpaused `no_construction` example.
+Independent native-source review and a fresh Luna comprehension check passed.
+The running trial received the same protocol clarification for all companies;
+its unaided URL-only business result remains qualified.
