@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -114,6 +116,31 @@ class AssetBuildTests(unittest.TestCase):
 class PrivateService:
     def handle(self, *args, **kwargs):
         raise ServiceError("unauthorized", status=401)
+
+
+class ReleaseKitTests(unittest.TestCase):
+    def test_real_release_kit_runs_without_checkout_or_site_packages(self):
+        archive = agent_assets.build_agent_assets()["/agent/client.zip"][0]
+        environment = dict(os.environ)
+        environment.pop("PYTHONPATH", None)
+        environment.pop("PYTHONHOME", None)
+        with tempfile.TemporaryDirectory() as directory:
+            with zipfile.ZipFile(io.BytesIO(archive)) as kit:
+                kit.extractall(directory)
+            help_reply = subprocess.run(
+                [sys.executable, "-S", "-m", "backend.agent_client", "--help"],
+                cwd=directory, env=environment, capture_output=True, text=True, timeout=10)
+            self.assertEqual(help_reply.returncode, 0, help_reply.stderr)
+            self.assertIn("--state", help_reply.stdout)
+            schema_reply = subprocess.run(
+                [sys.executable, "-S", "-c",
+                 "import json; from backend.capture_tools import tool_definitions; print(json.dumps(tool_definitions()))"],
+                cwd=directory, env=environment, capture_output=True, text=True, timeout=10)
+            self.assertEqual(schema_reply.returncode, 0, schema_reply.stderr)
+            schemas = json.loads(schema_reply.stdout)
+            self.assertEqual(len(schemas), 7)
+            self.assertTrue(all(tool["inputSchema"]["type"] == "object" for tool in schemas))
+            self.assertNotIn('"$ref"', schema_reply.stdout)
 
 
 class PublicAgentHTTPTests(unittest.TestCase):
