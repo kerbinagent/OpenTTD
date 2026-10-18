@@ -228,6 +228,12 @@ reciprocal road use and two paid competing services were not established.
 Image-use and history-scope qualifications remain explicit in that record.
 Full semantic parity, the four-company gate and release closure remain unproved.
 
-The fresh four-Luna trial on runtime04 is running on frozen `4e26eb85…` with the shared road
-guide from 03:04:49.222991 to the fixed 04:34:49.222991 UTC cutoff on
-2026-10-18. It supplies no acceptance outcome yet.
+The completed [runtime04 four-Luna trial](luna-trial-04.md) used frozen
+`4e26eb85…` and the shared road guide from 03:04:49.222991 to the unchanged
+04:34:49.222991 UTC cutoff on 2026-10-18. Both text companies and the capture
+cooperator earned revenue; the capture competitor earned none. Genuine model
+receipt of 220 native PNG inputs, meaningful chat and reciprocal paid road
+cooperation were verified. Full acceptance was not met; paid competition,
+closed 1952 annual reconciliation for the capture companies and own-company-private
+chat scope remain unestablished. The record preserves the interruption, recovery,
+timing gaps and private-scope qualifications.
