@@ -171,6 +171,13 @@ actual 104-action/60-query export has BLAKE2b-256
 all other catalog content is unchanged. The build, actual export and 277 backend
 tests passed. Native gameplay suites retain the preceding binary attribution.
 
+The permanent `local-mixed` world now runs that 104-action/60-query build after
+its 2026-10-18 upgrade at approximately 03:10 UTC. Historical receipts,
+credentials, run bindings and history survived the recorded preservation checks;
+authenticated public reads, capture restrictions and actual Chrome checks passed.
+The original production action POST was not retried. See the
+[upgrade evidence and limits](integration_validation.md#mixed-world-gameplay-gate).
+
 The earlier validated `bd6fa099…` native snapshot has an actual 104-action/56-query
 catalog with BLAKE2b-256
 `62b25b961f2b7be96d50a37e62cbbc9f47128ffa2e151ee3bb092ce076b57cf1`.
@@ -181,8 +188,16 @@ historical build attributions are recorded in
 A separate genuine-PNG road-stop proof succeeded after a 20.000667-second
 inspection, completed in 20.728900 seconds, and retained its request identity,
 execution tick and station incarnation on exact retry. This does not diagnose
-the earlier unknown Luna rejections. The queued older same-ID text question
-proof passed; duplicate visual-popup validation remains pending.
+the earlier unknown Luna rejections. The older same-ID text-issuance proof and a
+separate genuine-PNG popup proof on native `4e26eb85…` (104 actions / 60 queries)
+passed. The latter captured the older visible YES witness and one native answer;
+GameScript observed one YES and zero NO answers. Both native popups were gone after
+replay; text-inbox retirement remains separate. Exact retry retained its sequence,
+intent and execution tick despite checkpoint advancement; a new request ID with
+the invalidated image received 404. Twelve PNG downloads represented seven image
+IDs. [Proof evidence and limits](integration_validation.md#parity-integration-checks-in-progress)
+record the four preserved incomplete attempts and exclude timed lease-boundary,
+restart, universal-GUI and autonomous-play claims.
 
 [Maximum-map helper cost](industry-platform-proof.md#measured-maximum-map-cost)
 is measured on its attributed debug test build: 20 fresh 4096 × 4096 scans had
@@ -212,3 +227,7 @@ from the road network. Direct partner chat reached all four clients, but useful
 reciprocal road use and two paid competing services were not established.
 Image-use and history-scope qualifications remain explicit in that record.
 Full semantic parity, the four-company gate and release closure remain unproved.
+
+The fresh four-Luna trial on runtime04 is running on frozen `4e26eb85…` with the shared road
+guide from 03:04:49.222991 to the fixed 04:34:49.222991 UTC cutoff on
+2026-10-18. It supplies no acceptance outcome yet.
