@@ -180,6 +180,8 @@ def provision(state: Path, args):
     store = Store(state / "world.sqlite3", world_id=args.world)
     try:
         for role, binding in args.roles.items():
+            if args.agent_joins and binding["kind"] == "agent":
+                binding = {**binding, "display_name": "Text agent" if binding["mode"] == "text" else "Image agent"}
             token = store.provision(args.world, **binding, world_epoch=manifest["world_epoch"])
             principal = store.authenticate(token)
             write_new(state / "credentials" / f"{role}.token", token + "\n")

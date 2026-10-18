@@ -139,6 +139,36 @@ class OvernightProfileTests(unittest.TestCase):
         with self.assertRaises(mixed_world.StartupError):
             mixed_world.agent_join_pool(self.state, args, changed)
 
+    def test_public_admission_labels_only_new_agent_slots_neutrally(self):
+        for profile in ("luna", "mixed", "overnight"):
+            with self.subTest(profile=profile):
+                self.state = self.root / ("public-" + profile)
+                args = self.arguments(profile, "--agent-joins")
+                bindings = {role: dict(binding) for role, binding in args.roles.items()}
+                manifest = self.provision(args)
+                store = Store(self.state / "world.sqlite3", world_id=args.world)
+                try:
+                    for role, binding in bindings.items():
+                        principal = store.get_principal(manifest["runs"][role]["run_id"])
+                        expected = ("Text agent" if binding["mode"] == "text" else "Image agent") if binding["kind"] == "agent" else binding["display_name"]
+                        self.assertEqual(principal.display_name, expected)
+                        for key in ("identity_id", "company_id", "mode", "kind"):
+                            self.assertEqual(getattr(principal, key), binding[key])
+                    self.assertEqual(args.roles, bindings)
+                finally:
+                    store.close()
+
+    def test_nonpublic_luna_keeps_experiment_labels(self):
+        args = self.arguments("luna")
+        manifest = self.provision(args)
+        store = Store(self.state / "world.sqlite3", world_id=args.world)
+        try:
+            for role, binding in args.roles.items():
+                principal = store.get_principal(manifest["runs"][role]["run_id"])
+                self.assertEqual(principal.display_name, binding["display_name"])
+        finally:
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

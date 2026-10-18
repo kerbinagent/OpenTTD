@@ -115,6 +115,47 @@ class AdmissionTests(unittest.TestCase):
             self.assert_code("unauthorized", lambda: self.service.handle(method, path, "claim"))
         self.assertFalse(self.engine.calls)
 
+    def test_participants_hide_only_unclaimed_pool_runs_without_changing_replay(self):
+        # This renderer fixture tests admission only; roster worker filtering is
+        # covered by the service tests with a full renderer implementation.
+        self.service.renderer = None
+        operator_token = self.store.provision("world", "operator-agent", 4, kind="agent", display_name="Operator agent")
+
+        def people():
+            return self.service.handle("GET", "/v1/participants", operator_token)[1]["participants"]
+
+        self.assertEqual([person["identity_id"] for person in people()], ["operator-agent"])
+        self.assertEqual(len(self.store.principals_for_world("world")), 5)
+        secret = secrets.token_urlsafe(32)
+        _, joined = self.join(secret)
+        visible = {person["identity_id"]: person for person in people()}
+        self.assertEqual(set(visible), {"operator-agent", joined["identity_id"]})
+        self.assertEqual(visible[joined["identity_id"]]["presence"], "unknown")
+        self.assertEqual(self.join(secret), (200, joined))
+        self.assertEqual(self.service.handle("GET", "/v1/me", joined["token"])[1]["run_id"], joined["run_id"])
+        # Merely reading the roster neither claims another slot nor revokes
+        # its credential/membership, even though it is hidden from presentation.
+        self.assertEqual(len(self.claims()), 1)
+        self.assertEqual(len(self.store.principals_for_world("world")), 5)
+        for principal in self.principals:
+            self.assertEqual(self.store.authenticate(self.tokens[principal.run_id]), principal)
+
+        _, visual = self.join(mode="visual")
+        visible = {person["identity_id"]: person for person in people()}
+        self.assertEqual(set(visible), {"operator-agent", joined["identity_id"], visual["identity_id"]})
+        self.assertEqual(visible[visual["identity_id"]]["presence"], "unknown")
+        self.store.revoke_membership("world", joined["identity_id"], joined["company_id"])
+        self.assertNotIn(joined["identity_id"], {person["identity_id"] for person in people()})
+        self.assert_code("join_revoked", lambda: self.join(secret))
+
+    def test_participants_without_configured_pool_retain_operator_agents(self):
+        self.service.renderer = None
+        self.service.admission = None
+        token = self.tokens[self.principals[0].run_id]
+        people = self.service.handle("GET", "/v1/participants", token)[1]["participants"]
+        self.assertEqual({person["identity_id"] for person in people}, {p.identity_id for p in self.principals})
+        self.assertTrue(all(person["presence"] == "unknown" for person in people))
+
     def test_claim_is_scoped_and_private_material_is_not_stored(self):
         secret = secrets.token_urlsafe(32)
         status, reply = self.join(secret)

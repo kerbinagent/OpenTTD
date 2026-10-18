@@ -105,6 +105,10 @@ class AgentAdmission:
             slots.append(_Slot(principal, digest, token))
         return cls(store, world_id, value["world_epoch"], slots, renderer)
 
+    def unclaimed_runs(self):
+        """Unused configured slots, for public presentation only."""
+        return self._by_run.keys() - self.store.agent_join_claimed_runs(self.world_id)
+
     def _reply(self, claim, mode):
         if claim["mode"] != mode:
             raise ServiceError("join_conflict", status=409)

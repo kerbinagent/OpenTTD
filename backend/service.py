@@ -419,9 +419,12 @@ class Service:
                     pass
             people = {}
             model_reports = self.store.model_reports_for_world(principal.world_id)
+            unclaimed = self.admission.unclaimed_runs() if self.admission else set()
             worker_memberships = self.social.native_memberships_for_keys(principal.world_id,
                 self.renderer.managed_native_worker_keys()) if self.renderer and self.engine is not None else set()
             for member in self.store.principals_for_world(principal.world_id):
+                if member.kind == "agent" and member.run_id in unclaimed:
+                    continue
                 if member.mode == "native" and (self.engine is None or
                         (member.identity_id, member.company_id) in worker_memberships):
                     continue
