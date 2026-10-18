@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one private local mixed or four-player Luna world; preserve it on exit.
+"""Run one private local mixed, Luna, or overnight world; preserve it on exit.
 
 This launcher owns process lifetimes and operator company provisioning only.
 The backend owns request sequencing, checkpoint scheduling and recovery.
@@ -39,7 +39,7 @@ KEY = re.compile(r"[0-9a-fA-F]{64}\Z")
 
 
 def profile_bindings(profile):
-    """Two fixed role layouts; each invocation receives its own maps."""
+    """Fixed role layouts; each invocation receives its own maps."""
     if profile == "mixed":
         return {
             "human": {"identity_id": "local-human", "company_id": 0, "mode": "visual", "kind": "human", "display_name": "Human viewer"},
@@ -53,6 +53,14 @@ def profile_bindings(profile):
             "text-competitor": {"identity_id": "luna-text-competitor", "company_id": 2, "mode": "text", "kind": "agent", "display_name": "Luna text competitor"},
             "visual-competitor": {"identity_id": "luna-visual-competitor", "company_id": 3, "mode": "visual", "kind": "agent", "display_name": "Luna visual competitor"},
         }, {"visual-cooperator": "r1", "visual-competitor": "r3"}
+    if profile == "overnight":
+        roles = {"human": {"identity_id": "overnight-human", "company_id": 0,
+                           "mode": "visual", "kind": "human", "display_name": "Overnight human"}}
+        for company, name in enumerate(("passenger-road", "passenger-rail", "passenger-mixed",
+                                        "goods-road", "goods-rail", "goods-mixed"), start=1):
+            roles[name] = {"identity_id": "overnight-" + name, "company_id": company,
+                           "mode": "text", "kind": "agent", "display_name": "Overnight " + name.replace("-", " ")}
+        return roles, {"human": "r0"}
     raise StartupError("Unknown fixed launcher profile")
 
 
@@ -110,7 +118,7 @@ def process_paths(state: Path, name: str):
     return directory, directory / "config", directory / "data"
 
 
-def prepare_process(state: Path, name: str, baseset: Path, size: int, *, label="", renderer=False, luna=False):
+def prepare_process(state: Path, name: str, baseset: Path, size: int, *, label="", renderer=False, profile="mixed"):
     directory, config, data = process_paths(state, name)
     for path in (directory, config, data, config / "openttd", data / "openttd"):
         private_directory(path, create=True)
@@ -120,11 +128,11 @@ def prepare_process(state: Path, name: str, baseset: Path, size: int, *, label="
               "[version]\nini_version = 8\n"
               "[network]\nserver_game_type = local\npause_on_join = false\n"
               "min_active_clients = 0\nmax_companies = 15\n"
-              + ("max_lag_time = 2000\n" if luna else "")
+              + ("max_lag_time = 2000\n" if profile == "luna" and not renderer else "")
               + "[gui]\npause_on_newgame = false\nautosave = off\n"
               "[misc]\nlanguage = english.lng\nsavegame_format = lzma:2\n"
               f"[game_creation]\nmap_x = {int(math.log2(size))}\nmap_y = {int(math.log2(size))}\n"
-              + ("starting_year = 1950\nlandscape = temperate\n" if luna else ""))
+              + ("starting_year = 1950\nlandscape = temperate\n" if profile in ("luna", "overnight") and not renderer else ""))
     write_new(config / "openttd" / "private.cfg",
               "[version]\nini_version = 8\n[network]\n"
               f"client_name = {label}\nserver_name = Local mixed world\n")
@@ -138,13 +146,13 @@ def prepare_process(state: Path, name: str, baseset: Path, size: int, *, label="
 def provision(state: Path, args):
     for name in ("ipc", "logs", "credentials", "engine-state"):
         private_directory(state / name, create=True)
-    prepare_process(state, "engine", args.baseset, args.map_size, luna=args.profile == "luna")
+    prepare_process(state, "engine", args.baseset, args.map_size, profile=args.profile)
     for role, worker in args.workers.items():
         prepare_process(state, worker, args.baseset, args.map_size,
-                        label=f"mixed-{worker}", renderer=True)
+                        label=f"mixed-{worker}", renderer=True, profile=args.profile)
     manifest = {"version": 1, "profile": args.profile, "world_id": args.world, "world_epoch": uuid.uuid4().hex,
                 "ready": False, "runs": {}, "renderer_keys": {}}
-    if args.profile == "luna":
+    if args.profile in ("luna", "overnight"):
         manifest["generation"] = {"map_size": args.map_size, "seed": args.seed,
                                   "starting_year": 1950, "landscape": "temperate"}
     store = Store(state / "world.sqlite3", world_id=args.world)
@@ -234,6 +242,8 @@ class Stack:
     def environment(self, name, *, renderer=False):
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith("OPENTTD_INTEGRATION_") and key != "OPENTTD_RENDERER_IMAGE_DIR"}
+        if self.args.profile == "overnight":
+            environment.pop("OPENTTD_RENDERER_PARK_MS", None)
         directory, config, data = process_paths(self.state, name)
         environment.update({"XDG_CONFIG_HOME": str(config), "XDG_DATA_HOME": str(data),
                             "OPENTTD_INTEGRATION_WORLD_ID": self.args.world,
@@ -409,16 +419,20 @@ class Stack:
         print("Session tokens are in private files; their contents are never printed:")
         for role in self.roles:
             print(f"  {role}: {self.state / 'credentials' / (role + '.token')}")
-        if self.args.profile == "mixed":
+        if self.args.profile in ("mixed", "overnight"):
             human = ["env", f"XDG_DATA_HOME={self.state / 'engine' / 'data'}"]
             if os.environ.get("LD_LIBRARY_PATH"):
                 human.append(f"LD_LIBRARY_PATH={os.environ['LD_LIBRARY_PATH']}")
             human += [str(self.args.binary), "-n", f"127.0.0.1:{self.args.native_port}#1", "-I", self.args.graphics]
             print("Matching native human client: " + shlex.join(human))
+        if self.args.profile == "mixed":
             print("Company 1: human. Company 2: text agent (native joins closed). Company 3: visual agent.")
-        else:
+        elif self.args.profile == "luna":
             print("Luna companies: text 0 / visual 1 cooperate; text 2 / visual 3 compete.")
             print("Native companies are closed to other clients; visual companies admit their authenticated workers.")
+        else:
+            print("Overnight company IDs: human visual 0; passenger road/rail/mixed 1/2/3; goods road/rail/mixed 4/5/6.")
+            print("Only r0 is a native renderer. Text companies are closed to native joins.")
         print("Ctrl+C stops this group and preserves state. Restart with the same command.", flush=True)
         reported = set()
         while not self.stop_requested:
@@ -478,15 +492,15 @@ def parse_args(argv=None):
     parser.add_argument("--baseset", type=Path, required=True, help="directory containing the installed base graphics")
     parser.add_argument("--state-dir", type=Path, required=True, help="new empty or existing private world directory")
     parser.add_argument("--world", required=True, help="stable local world ID")
-    parser.add_argument("--profile", choices=("mixed", "luna"), default="mixed",
-                        help="fixed human/text/visual layout (default) or two text and two visual Luna companies")
+    parser.add_argument("--profile", choices=("mixed", "luna", "overnight"), default="mixed",
+                        help="fixed mixed (default), four-company Luna, or seven-company overnight layout")
     parser.add_argument("--native-port", type=port, default=3979)
     parser.add_argument("--http-port", type=port, default=8080)
     parser.add_argument("--transport", choices=("asgi", "http"), default="asgi", help="ASGI (default) or explicit local-development HTTP fallback")
     parser.add_argument("--graphics", default="OpenGFX", help="installed base graphics name")
     parser.add_argument("--map-size", type=int, choices=(128, 256, 512, 1024),
-                        help="new square map size; default 512 for mixed, 128 for luna")
-    parser.add_argument("--seed", type=generation_seed, help="new generated world's seed; luna defaults to 20261018")
+                        help="new square map size; default 512 for mixed/overnight, 128 for luna")
+    parser.add_argument("--seed", type=generation_seed, help="new generated world's seed; luna defaults to 20261018, overnight to 20261021")
     parser.add_argument("--initial-save", type=Path, help="optional starting save for a new world; restart always uses the checkpoint")
     args = parser.parse_args(argv)
     args.roles, args.workers = profile_bindings(args.profile)
@@ -494,6 +508,8 @@ def parse_args(argv=None):
         args.map_size = 128 if args.profile == "luna" else 512
     if args.profile == "luna" and args.seed is None:
         args.seed = 20261018
+    if args.profile == "overnight" and args.seed is None:
+        args.seed = 20261021
     args.binary, args.baseset = args.binary.resolve(), args.baseset.resolve()
     absolute_state = args.state_dir.absolute()
     if absolute_state.resolve() != absolute_state:
@@ -512,7 +528,7 @@ def parse_args(argv=None):
     if len(os.fsencode(args.state_dir / "ipc" / "engine.sock")) >= 104:
         parser.error("--state-dir is too long for private Unix sockets; use a shorter canonical path")
     if args.initial_save:
-        if args.profile == "luna" or args.seed is not None:
+        if args.profile != "mixed" or args.seed is not None:
             parser.error("--initial-save is for the mixed profile and cannot be combined with --seed")
         args.initial_save = args.initial_save.resolve()
         if not args.initial_save.is_file():

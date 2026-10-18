@@ -139,6 +139,22 @@ output and publishes a verified file with mode `0600`. It performs no gameplay
 or database operations and never replaces the backend's checked-in catalog;
 review the exported artifact before updating that file separately.
 
+## Seven-company overnight profile
+
+`--profile overnight` creates a fresh 512 × 512 temperate world in 1950 with
+seed `20261021` by default. It provisions a human visual session in company ID 0
+with one native renderer (`r0`), plus six text-agent sessions in companies 1–6:
+`passenger-road`, `passenger-rail`, `passenger-mixed`, `goods-road`, `goods-rail`,
+and `goods-mixed`. Each credential is in its matching private
+`credentials/<role>.token` file. The human can use the browser or the printed
+matching native-client command; agent roles are ordinary API clients.
+
+Use a new private state directory and unused ports with `--profile overnight`.
+The launcher keeps its native world, backend and browser endpoint running until
+you stop it; it does not run models or impose a model-work deadline. Give each
+agent its own credential and start/stop instructions outside this launcher.
+An initial save is accepted only by the default `mixed` profile.
+
 ## Four-company Luna profile
 
 `--profile luna` selects a second fixed layout for isolated gameplay exploration:
