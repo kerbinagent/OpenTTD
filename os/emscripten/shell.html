@@ -222,9 +222,25 @@
         }
       };
 
-      document.getElementById('fullscreen').addEventListener('click', function() {
-        // Emscripten updates the SDL surface and coordinate mapping when resizing.
-        if (Module.requestFullscreen) Module.requestFullscreen(false, true);
+      var fullscreenButton = document.getElementById('fullscreen');
+      function fullscreenUnavailable(error) {
+        fullscreenButton.textContent = 'Fullscreen unavailable';
+        console.error('Fullscreen request failed:', error);
+      }
+      fullscreenButton.addEventListener('click', function() {
+        // SDL2 follows the browser viewport resize and owns the game surface.
+        try {
+          var request = document.fullscreenElement
+            ? document.exitFullscreen()
+            : document.documentElement.requestFullscreen();
+          request.catch(fullscreenUnavailable);
+        } catch (error) {
+          fullscreenUnavailable(error);
+        }
+        Module.canvas.focus();
+      });
+      document.addEventListener('fullscreenchange', function() {
+        fullscreenButton.textContent = document.fullscreenElement ? 'Exit fullscreen' : 'Fullscreen';
         Module.canvas.focus();
       });
 

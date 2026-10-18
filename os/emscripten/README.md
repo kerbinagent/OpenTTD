@@ -71,9 +71,9 @@ and all other paths are rejected. The process supports four concurrent binary
 WebSocket connections, bounds messages and writes, and releases connections on
 failure. Exact local Host and Origin checks guard browser cross-site access;
 they do not authenticate other local processes. No API credentials are used.
-The Fullscreen button invokes the exported Emscripten `requestFullscreen`
-helper with canvas resizing enabled; keep `requestFullscreen` in the build's
-`EXPORTED_RUNTIME_METHODS`. Native SDL handles pointer, wheel and keyboard input.
+The Fullscreen button uses the browser Fullscreen API. SDL2 follows the viewport
+resize and updates the native game surface and input coordinates. Native SDL
+handles pointer, wheel and keyboard input.
 
 Run isolated relay tests without a game server:
 

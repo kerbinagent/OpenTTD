@@ -388,6 +388,10 @@ struct AfterNewGRFScan : NewGRFScanCallback {
 		/* We want the new (correct) NewGRF count to survive the loading. */
 		uint last_newgrf_count = _settings_client.gui.last_newgrf_count;
 		LoadFromConfig();
+#ifdef __EMSCRIPTEN__
+		/* A fresh browser profile should be able to join without native setup. */
+		if (_settings_client.network.client_name.empty()) _settings_client.network.client_name = "Browser player";
+#endif
 		_settings_client.gui.last_newgrf_count = last_newgrf_count;
 		/* Since the default for the palette might have changed due to
 		 * reading the configuration file, recalculate that now. */
