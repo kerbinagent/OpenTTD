@@ -1,6 +1,7 @@
 """Isolated relay checks. Never connects to a running OpenTTD server."""
 import asyncio
 import importlib.util
+import json
 from pathlib import Path
 import socket
 import tempfile
@@ -85,7 +86,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
     async def test_static_bootstrap_and_rejections(self):
         async with self.session.get(self.base + '/browser-config.js') as response:
             self.assertEqual(response.status, 200)
-            self.assertIn('"company": 1', await response.text())
+            self.assertIn('"worldId": null', await response.text())
             self.assertEqual(response.headers['X-Content-Type-Options'], 'nosniff')
         for path in ['/secret', '/openttd.js?target=elsewhere', '/%2e%2e/secret', '/openttd.js/extra']:
             async with self.session.get(self.base + path) as response:
@@ -102,6 +103,61 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         async with self.session.get(self.base + '/openttd.js') as response:
             self.assertEqual(response.status, 404)
         self.assertEqual(self.connections, 0)
+
+    async def test_entry_assets_and_world_scoped_public_configuration(self):
+        await self.server.close()
+        self.server = TestServer(relay.create_app(self.root, self.port, 55029,
+                                world_id='world-epoch', api_port=18160), port=self.port)
+        await self.server.start_server()
+        for host in ['localhost', '127.0.0.1']:
+            async with self.session.get(self.base + '/browser-config.js', headers={'Host': f'{host}:{self.port}'}) as response:
+                config = json.loads((await response.text()).split('=', 1)[1].rstrip(';\n'))
+                self.assertEqual(config['worldId'], 'world-epoch')
+                self.assertEqual(config['apiOrigin'], f'http://{host}:18160')
+                self.assertEqual(config['nativePort'], 55029)
+                self.assertNotIn('company', config)
+        for name, content_type in relay.ENTRY_ASSETS.items():
+            async with self.session.get(self.base + '/' + name) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.content_type, content_type)
+                self.assertNotIn(b'test-secret-api-token', await response.read())
+        for bad in ['with space', '../secret', '', 'a' * 129]:
+            with self.assertRaises(ValueError):
+                relay.create_app(self.root, world_id=bad)
+        self.assertEqual(self.connections, 0)
+
+    async def test_tailnet_proxy_has_exact_https_host_origin_and_fixed_agent_url(self):
+        await self.server.close()
+        public = 'https://game.example.ts.net:8443'
+        app = relay.create_app(self.root, self.port, self.tcp.sockets[0].getsockname()[1],
+                               world_id='epoch', public_origin=public,
+                               public_api_origin='https://game.example.ts.net:8444')
+        self.server = TestServer(app, port=self.port)
+        await self.server.start_server()
+        async with self.session.get(self.base + '/browser-config.js', headers={'Host': 'game.example.ts.net:8443'}) as response:
+            self.assertEqual(response.status, 200)
+            config = json.loads((await response.text()).split('=', 1)[1].rstrip(';\n'))
+            self.assertEqual(config['apiOrigin'], 'https://game.example.ts.net:8444')
+            self.assertEqual(config['publicOrigin'], public)
+        async with self.session.ws_connect(self.base + '/native', protocols=('binary',),
+                headers={'Host': 'game.example.ts.net:8443', 'Origin': public}) as ws:
+            await ws.send_bytes(b'tailnet')
+            self.assertEqual((await ws.receive(timeout=2)).data, b'tailnet')
+        for origin in ['https://evil.invalid', 'http://game.example.ts.net:8443', 'https://game.example.ts.net:8444']:
+            with self.assertRaises(aiohttp.WSServerHandshakeError):
+                await self.session.ws_connect(self.base + '/native', protocols=('binary',),
+                    headers={'Host': 'game.example.ts.net:8443', 'Origin': origin})
+        for bad in ['http://example.com', 'https://example.com/', 'https://u:p@example.com',
+                    'https://example.com?x=y', 'https://example.com#fragment', 'https://example.com:99999',
+                    'https://example.com:0', 'https://example.com:443', 'https://bad_host.example', 'https://-bad.example']:
+            with self.assertRaises(ValueError):
+                relay.create_app(self.root, public_origin=bad)
+        await self.server.close()
+        self.server = TestServer(relay.create_app(self.root, self.port, public_origin=public, api_port=18160), port=self.port)
+        await self.server.start_server()
+        async with self.session.get(self.base + '/browser-config.js', headers={'Host': 'game.example.ts.net:8443'}) as response:
+            config = json.loads((await response.text()).split('=', 1)[1].rstrip(';\n'))
+            self.assertIsNone(config['apiOrigin'])
 
     async def test_metadata_is_opt_in_and_credential_options_are_paired(self):
         async with self.session.get(self.base + '/model-roster') as response:

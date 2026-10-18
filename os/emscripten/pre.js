@@ -1,17 +1,21 @@
 Module.arguments.push('-mnull', '-snull', '-vsdl');
 /* This public bootstrap is provided only by the fixed loopback relay. */
 var browserRelay = window.OPENTTD_BROWSER_RELAY;
-var localRelay = location.protocol === 'http:' &&
-    (location.hostname === '127.0.0.1' || location.hostname === 'localhost') &&
-    browserRelay && Number.isInteger(browserRelay.nativePort) &&
+var localRelay = browserRelay &&
+    ((location.protocol === 'http:' && (location.hostname === '127.0.0.1' || location.hostname === 'localhost')) ||
+     (location.protocol === 'https:' && location.origin === browserRelay.publicOrigin)) &&
+    Number.isInteger(browserRelay.nativePort) &&
     browserRelay.nativePort > 0 && browserRelay.nativePort <= 65535 &&
-    browserRelay.company === 1 && browserRelay.websocketPath === '/native';
+    Number.isInteger(browserRelay.company) &&
+    ((browserRelay.company >= 1 && browserRelay.company <= 15) || browserRelay.company === 254 || browserRelay.company === 255) &&
+    browserRelay.websocketPath === '/native';
 if (localRelay) {
-    Module.arguments.push('-n', '127.0.0.1:' + browserRelay.nativePort + '#1', '-I', 'OpenGFX');
+    Module.arguments.push('-n', '127.0.0.1:' + browserRelay.nativePort + '#' + browserRelay.company,
+        '-c', '/home/web_user/.openttd/openttd.cfg', '-I', 'OpenGFX');
 }
 Module['websocket'] = { url: function(host, port, proto) {
     if (localRelay) {
-        return 'ws://' + location.host +
+        return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host +
             (host === '127.0.0.1' && Number(port) === browserRelay.nativePort && proto === 'tcp'
                 ? browserRelay.websocketPath : '/denied-native-destination');
     }
@@ -45,7 +49,17 @@ Module.preRun.push(function() {
 
     Module.addRunDependency('syncfs');
     FS.syncfs(true, function (err) {
-        Module.removeRunDependency('syncfs');
+        if (localRelay) {
+            if (err) { window.openttd_browser_storage_failed(); return; }
+            try { window.OpenTTDBrowser.prepareIdentity(FS, window.crypto, personal_dir); }
+            catch (error) { window.openttd_browser_storage_failed(); return; }
+            FS.syncfs(false, function (saveError) {
+                if (saveError) { window.openttd_browser_storage_failed(); return; }
+                Module.removeRunDependency('syncfs');
+            });
+        } else {
+            Module.removeRunDependency('syncfs');
+        }
     });
 
     window.openttd_syncfs_shown_warning = false;

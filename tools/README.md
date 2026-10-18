@@ -95,16 +95,21 @@ separate loopback relay against this world's native port:
 
 ```sh
 python3 tools/browser_client.py /absolute/path/to/public-build \
-  --port 18087 --native-port 3979
+  --port 18087 --native-port 3979 --world-id WORLD_EPOCH --api-port 8080
 ```
 
-Open http://localhost:18087/. It joins the human company directly; no API token
-is needed. Native mouse movement, dragging, tooltips, wheel and keyboard input
+Open http://localhost:18087/. Choose observer, human company, or a copyable agent
+prompt. Human play creates a company or joins an existing one through the native
+Players window; this browser remembers its last confirmed company for refresh
+and return visits. Use the manifest's stable world epoch for `WORLD_EPOCH`.
+No API token is needed. Native mouse movement, dragging, tooltips, wheel and keyboard input
 run locally. Use **Fullscreen** to enter browser fullscreen with a resized game
 surface. The native Players window offers company chat, including companies
 controlled through the API with no connected native client. Private company
 messages use the existing company audience shared by humans and agents.
 Starting or stopping this relay does not restart the world.
+See the [Tailscale HTTPS instructions](../os/emscripten/README.md#fixed-loopback-native-relay)
+for access from other machines, exact public origins and native identity recovery.
 
 ## Capture browser controls
 

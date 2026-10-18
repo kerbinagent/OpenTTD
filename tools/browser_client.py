@@ -5,8 +5,10 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 from pathlib import Path
 import stat
+from urllib.parse import urlsplit
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, WSMsgType, web
 
@@ -18,6 +20,21 @@ WRITE_TIMEOUT = 10
 METADATA_LIMIT = 64 * 1024
 METADATA_TIMEOUT = 3
 METADATA_SESSION = web.AppKey('metadata_session', ClientSession)
+ENTRY_ROOT = Path(__file__).resolve().parents[1] / 'os' / 'emscripten'
+ENTRY_ASSETS = {'browser-entry.js': 'application/javascript', 'browser-entry.css': 'text/css'}
+
+
+def https_origin(value):
+    parsed = urlsplit(value)
+    if (parsed.scheme != 'https' or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or parsed.path or parsed.query or parsed.fragment
+            or any(c.isspace() for c in value) or parsed.hostname != parsed.hostname.lower()
+            or len(parsed.hostname) > 253
+            or not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in parsed.hostname.split('.'))
+            or (parsed.port is not None and (not 1 <= parsed.port <= 65535 or parsed.port == 443))
+            or parsed.netloc != parsed.hostname + (f':{parsed.port}' if parsed.port is not None else '')):
+        raise ValueError('public origin must be an exact HTTPS origin without a path')
+    return value
 
 
 def port_number(value):
@@ -98,10 +115,19 @@ def model_roster(payload):
     return {'participants': result}
 
 
-def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, metadata_token_file=None):
+def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, metadata_token_file=None,
+               *, world_id=None, api_port=None, public_origin=None, public_api_origin=None):
     if (metadata_port is None) != (metadata_token_file is None):
         raise ValueError('metadata port and token file must be provided together')
     metadata_token = read_metadata_token(metadata_token_file) if metadata_port is not None else None
+    if world_id is not None and (not isinstance(world_id, str) or not 1 <= len(world_id) <= 128
+                                 or not all(c.isalnum() or c in '-_.' for c in world_id)):
+        raise ValueError('world identity must be a bounded identifier')
+    entry_assets = {name: (ENTRY_ROOT / name).read_bytes() for name in ENTRY_ASSETS}
+    if public_origin is not None:
+        https_origin(public_origin)
+    if public_api_origin is not None:
+        https_origin(public_api_origin)
     root = Path(asset_dir).resolve(strict=True)
     if not root.is_dir():
         raise ValueError('asset directory required')
@@ -112,13 +138,16 @@ def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, meta
             raise ValueError(f'missing or symlinked public build asset: {name}')
     hosts = {f'127.0.0.1:{port}', f'localhost:{port}'}
     origins = {'http://' + host for host in hosts}
+    if public_origin is not None:
+        hosts.add(urlsplit(public_origin).netloc)
+        origins.add(public_origin)
     active = set()
 
     @web.middleware
     async def guard(request, handler):
         if request.headers.getall('Host', []) not in ([host] for host in hosts):
             raise web.HTTPForbidden()
-        routes = {'/', '/browser-config.js', '/native'} | {'/' + name for name in ASSETS}
+        routes = {'/', '/browser-config.js', '/native'} | {'/' + name for name in ASSETS | ENTRY_ASSETS.keys()}
         if metadata_port is not None:
             routes.add('/model-roster')
         if request.query_string or '%' in request.raw_path or request.path not in routes:
@@ -132,9 +161,15 @@ def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, meta
         if request.path == '/':
             raise web.HTTPFound('/openttd.html')
         if request.path == '/browser-config.js':
-            config = {'nativePort': native_port, 'company': 1, 'websocketPath': '/native', 'modelRoster': metadata_port is not None}
+            host = request.host.split(':')[0]
+            local_api = f'http://{host}:{api_port}' if api_port is not None and request.host in {f'127.0.0.1:{port}', f'localhost:{port}'} else None
+            config = {'nativePort': native_port, 'websocketPath': '/native', 'modelRoster': metadata_port is not None,
+                      'worldId': world_id, 'publicOrigin': public_origin,
+                      'apiOrigin': public_api_origin or local_api}
             return web.Response(text='window.OPENTTD_BROWSER_RELAY=' + json.dumps(config) + ';\n', content_type='application/javascript')
         name = request.path[1:]
+        if name in entry_assets:
+            return web.Response(body=entry_assets[name], content_type=ENTRY_ASSETS[name])
         # Open without following a replacement symlink; retain the descriptor
         # while streaming so directory changes cannot change the served file.
         try:
@@ -242,10 +277,17 @@ def main():
     parser.add_argument('--native-port', type=port_number, default=3979)
     parser.add_argument('--metadata-port', type=port_number, help='fixed loopback API port for public model labels')
     parser.add_argument('--metadata-token-file', type=Path, help='server-held API credential; requires --metadata-port')
+    parser.add_argument('--world-id', help='stable world epoch for remembered company selection; change on a new world')
+    parser.add_argument('--api-port', type=port_number, help='fixed loopback public agent API port for copyable prompts')
+    parser.add_argument('--public-origin', type=https_origin, help='exact HTTPS browser origin of a trusted tailnet proxy')
+    parser.add_argument('--public-api-origin', type=https_origin, help='exact HTTPS public guide/API origin for agent prompts')
     args = parser.parse_args()
     if (args.metadata_port is None) != (args.metadata_token_file is None):
         parser.error('--metadata-port and --metadata-token-file must be provided together')
-    web.run_app(create_app(args.asset_dir, args.port, args.native_port, args.metadata_port, args.metadata_token_file), host='127.0.0.1', port=args.port, access_log=None, shutdown_timeout=5, max_line_size=4096, max_field_size=4096)
+    web.run_app(create_app(args.asset_dir, args.port, args.native_port, args.metadata_port, args.metadata_token_file,
+                           world_id=args.world_id, api_port=args.api_port, public_origin=args.public_origin,
+                           public_api_origin=args.public_api_origin), host='127.0.0.1', port=args.port,
+                access_log=None, shutdown_timeout=5, max_line_size=4096, max_field_size=4096)
 
 
 if __name__ == '__main__':

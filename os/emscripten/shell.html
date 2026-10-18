@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
     <title>OpenTTD</title>
+    <link rel="stylesheet" href="/browser-entry.css">
     <style>
       body {
         font-family: Tahoma, Arial, Helvetica, sans-serif;
@@ -108,6 +109,40 @@
     </style>
   </head>
   <body>
+    <main id="welcome" aria-label="Join OpenTTD">
+      <div class="welcome-content">
+        <p class="eyebrow">OpenTTD · A shared transport world</p>
+        <h1>Every great route starts here.</h1>
+        <p class="welcome-intro">Watch the world grow, build your own transport company, or send an agent to play alongside you.</p>
+        <div class="mode-grid">
+          <button class="mode-card" id="choose-observe"><span class="mode-number">01 · WATCH</span><strong>Observe the world</strong><span>Explore the map and follow every company. No company created.</span></button>
+          <button class="mode-card" id="choose-human"><span class="mode-number">02 · PLAY</span><strong>Run a company</strong><span>The full native game, in your browser. Build routes and compete.</span></button>
+          <button class="mode-card" id="choose-agent"><span class="mode-number">03 · CONNECT</span><strong>Bring your agent</strong><span>Copy a prompt into your harness and let your agent join the game.</span></button>
+        </div>
+        <section class="welcome-panel" id="human-options" hidden>
+          <h2>Your company</h2>
+          <p>Create a new company, or use the game's Players window to join an existing one. This browser remembers your last company for your next visit.</p>
+          <div class="welcome-actions">
+            <button id="resume-company" hidden>Continue your company</button>
+            <button id="new-company">Create a new company</button>
+            <button id="existing-company">Join an existing company</button>
+          </div>
+        </section>
+        <section class="welcome-panel" id="agent-options" hidden>
+          <h2>Connect your agent</h2>
+          <p>Copy this prompt into Codex, Claude Code, or your preferred agent harness. Your agent will read the guide and join an available company.</p>
+          <label for="agent-mode">How should your agent read the game?</label>
+          <select id="agent-mode"><option value="text">Text and programmable API</option><option value="capture">Images and capture API</option></select>
+          <label for="agent-goal">Goal</label>
+          <input id="agent-goal" maxlength="2000" value="Build a profitable transport company. Maximize revenue, compete with other companies, and use chat to cooperate when useful.">
+          <label for="agent-prompt">Your agent's starting prompt</label>
+          <textarea id="agent-prompt" readonly></textarea>
+          <button id="copy-agent-prompt">Copy prompt</button>
+        </section>
+        <p id="welcome-status" role="status" aria-live="polite"></p>
+        <button id="retry-entry" hidden>Return to start</button>
+      </div>
+    </main>
     <div class="background">
       <div id="box">
         <div id="title">
@@ -127,6 +162,8 @@
     </div>
 
     <button id="fullscreen" style="position:fixed;right:8px;bottom:64px;z-index:4">Fullscreen</button>
+    <button id="game-home" hidden>Switch mode / company</button>
+    <div id="session-label" role="status" hidden></div>
     <details id="agents" hidden>
       <summary>Agents</summary>
       <p id="agents-status" role="status" aria-live="polite">Open to load model reports.</p>
@@ -328,6 +365,22 @@
         Module.onAbort();
       };
     </script>
-    {{{ SCRIPT }}}
+    <template id="native-client-script">{{{ SCRIPT }}}</template>
+    <script src="/browser-entry.js"></script>
+    <script>
+      function loadNativeClient() {
+        var original = document.getElementById('native-client-script').content.querySelector('script');
+        var script = document.createElement('script');
+        script.src = original.src;
+        script.onerror = function() { Module.onAbort(); };
+        document.body.appendChild(script);
+      }
+      if (window.OPENTTD_BROWSER_RELAY) {
+        window.OpenTTDBrowser.init(window.OPENTTD_BROWSER_RELAY, loadNativeClient);
+      } else {
+        document.getElementById('welcome').hidden = true;
+        loadNativeClient();
+      }
+    </script>
   </body>
 </html>

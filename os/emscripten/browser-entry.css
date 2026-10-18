@@ -1,0 +1,26 @@
+:root { color-scheme: dark; }
+#welcome { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; overflow: auto; padding: 28px; box-sizing: border-box; background: radial-gradient(ellipse at 25% 5%, #244b4a, transparent 65%), #101c25; color: #eef4ef; }
+#welcome[hidden], #welcome [hidden] { display: none; }
+.welcome-content { width: min(960px, 100%); margin: auto; }
+.eyebrow { color: #adc9b9; letter-spacing: .17em; text-transform: uppercase; font-size: 12px; }
+#welcome h1 { font: 600 clamp(30px, 5vw, 52px)/1.1 Georgia, serif; margin: 12px 0 16px; }
+.welcome-intro { color: #bdccc9; font-size: 16px; line-height: 1.6; margin-bottom: 30px; }
+.mode-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.mode-card { text-align: left; border: 1px solid #526760; border-radius: 12px; background: #20322f; padding: 24px; color: inherit; font: inherit; cursor: pointer; }
+.mode-card:hover { background: #2c4540; border-color: #a4c7af; }
+.mode-card strong { display: block; font: 600 23px Georgia, serif; margin: 16px 0 12px; }
+.mode-card span:last-child { color: #bdccc9; line-height: 1.5; display: block; }
+.mode-number { color: #a6c7ae; font-size: 12px; }
+.welcome-panel { border: 1px solid #526760; border-radius: 12px; background: #20322f; padding: 24px; margin-top: 20px; }
+.welcome-panel h2 { margin-top: 0; }
+.welcome-panel p { color: #bdccc9; line-height: 1.6; }
+#welcome button:not(.mode-card), #game-home { border: 1px solid #8aa797; border-radius: 6px; background: #33554a; color: #fff; padding: 10px 16px; font: inherit; cursor: pointer; }
+#welcome button:disabled { opacity: .6; cursor: wait; }
+.welcome-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+#welcome label { display: block; margin: 16px 0 8px; }
+#welcome select, #welcome input, #welcome textarea { box-sizing: border-box; width: 100%; border: 1px solid #71887e; border-radius: 6px; background: #13241f; color: #f3f6ee; padding: 12px; font: inherit; }
+#welcome textarea { min-height: 126px; resize: vertical; line-height: 1.5; }
+#welcome-status { min-height: 24px; line-height: 1.5; color: #f3dca5; }
+#game-home { position: fixed; right: 8px; bottom: 8px; z-index: 4; padding: 6px 10px; }
+#session-label { position: fixed; left: 8px; bottom: 40px; z-index: 4; padding: 4px 8px; color: white; background: #1b2c28e6; pointer-events: none; border-radius: 4px; }
+@media (max-width: 700px) { .mode-grid { grid-template-columns: 1fr; } #welcome { padding: 20px; } .mode-card { padding: 16px; } .mode-card strong { margin: 8px 0; } }

@@ -343,6 +343,43 @@ whose manifest is SHA-256
 Operational readiness is recorded in `.worlds/overnight-browser-readiness.json`;
 the game and relay remain running independently of the browser.
 
+## Browser entry and remembered companies (2026-10-18)
+
+The native browser entry now offers observer, human and agent modes. The landing
+page and agent prompt load no WASM or native connection. Observer mode joins as
+a spectator and blocks outbound gameplay commands, company moves, chat and remote
+console requests. Human mode uses native company creation and the native Players
+window for existing companies. A world-scoped cookie remembers only the last
+server-confirmed company; native authentication remains authoritative. The native
+key is flushed to browser storage before connection, under an exclusive Web Lock.
+
+Independent architecture review preceded implementation, including a separate
+Tailscale HTTPS amendment. Correctness review caught and repaired native INI
+syntax/version mismatches, provisional assignment handling, deletion and missing
+company recovery, a map-transfer implicit-creation path, and chooser URL state.
+Seventeen JavaScript and thirteen isolated Python relay tests pass, covering
+storage failures, cookie scope/security, the fixed HTTPS/WSS origins and relay
+rejection boundaries. No authoritative native-server behavior changed.
+
+Chrome checks on a disposable native world verified the landing's lazy loading,
+the real prompt copy button, private company creation, same-company refresh and
+close/reopen recovery, native selection of an existing company, unavailable-slot
+recovery without creation, and a denied protected join returning to spectator.
+Observer new-company/join attempts with native pointer input left the company
+count unchanged. Fullscreen canvas and viewport dimensions matched, and the
+agent panel still loaded native participant labels. These are finite entry-flow
+checks, not a new gameplay parity or performance benchmark.
+
+Local evidence is under `/tmp/ottd-browser-entry-final-qa.jsonl`, the
+`/tmp/ottd-browser-entry-*.png` screenshots, source freeze
+`/tmp/ottd-browser-entry-source-freeze.json`, public build manifest
+`/tmp/ottd-browser-entry-release02-manifest.json`, and the disposable world's
+private logs in `/tmp/ottd-browser-entry-qa01`. The client uses the actual linked
+native revision `e386adfdfa`, whose non-integration gameplay/network sources
+match this build; the browser-only deltas are recorded separately. Tailscale
+Serve was disabled during local validation, so remote HTTPS is a separate
+deployment check rather than a claimed result of these fixtures.
+
 ## Agent model reports
 
 Commit `a9fa600fda` adds authenticated `PUT /v1/me/model` with

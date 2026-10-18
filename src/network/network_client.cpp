@@ -8,6 +8,9 @@
 /** @file network_client.cpp Client part of the network protocol. */
 
 #include "../stdafx.h"
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #ifdef WITH_INTEGRATION
 #include "../integration/renderer.h"
 #endif
@@ -41,6 +44,21 @@
 #include "../safeguards.h"
 
 /* This file handles all the client-commands */
+
+#ifdef __EMSCRIPTEN__
+/** Browser observers retain native inspection, while outbound mutations are disabled. */
+static bool BrowserReadOnly()
+{
+	static const bool read_only = EM_ASM_INT({ return !!(window.OPENTTD_BROWSER_SESSION && window.OPENTTD_BROWSER_SESSION.readOnly); });
+	return read_only;
+}
+
+/** The server's own-client assignment, rather than a requested/provisional company. */
+static void BrowserCompanyAssigned(CompanyID company)
+{
+	EM_ASM({ if (window.openttd_browser_company) window.openttd_browser_company($0); }, company.base());
+}
+#endif
 
 /** Read some packets, and when do use that data as initial load filter. */
 struct PacketReader : LoadFilter {
@@ -406,6 +424,9 @@ NetworkRecvStatus ClientNetworkGameSocketHandler::SendAck()
  */
 NetworkRecvStatus ClientNetworkGameSocketHandler::SendCommand(const CommandPacket &cp)
 {
+#ifdef __EMSCRIPTEN__
+	if (BrowserReadOnly()) return NetworkRecvStatus::Okay;
+#endif
 	Debug(Facility::Net, Severity::Trace3, "Client::SendCommand(): cmd={}", cp.cmd);
 
 	auto p = std::make_unique<Packet>(my_client, PacketGameType::ClientCommand);
@@ -426,6 +447,9 @@ NetworkRecvStatus ClientNetworkGameSocketHandler::SendCommand(const CommandPacke
  */
 NetworkRecvStatus ClientNetworkGameSocketHandler::SendChat(NetworkAction action, NetworkChatDestinationType type, int dest, std::string_view msg, int64_t data)
 {
+#ifdef __EMSCRIPTEN__
+	if (BrowserReadOnly()) return NetworkRecvStatus::Okay;
+#endif
 	Debug(Facility::Net, Severity::Trace3, "Client::SendChat(): action={}, type={}, dest={}", action, type, dest);
 
 	auto p = std::make_unique<Packet>(my_client, PacketGameType::ClientChat);
@@ -494,6 +518,9 @@ NetworkRecvStatus ClientNetworkGameSocketHandler::SendQuit()
  */
 NetworkRecvStatus ClientNetworkGameSocketHandler::SendRCon(std::string_view pass, std::string_view command)
 {
+#ifdef __EMSCRIPTEN__
+	if (BrowserReadOnly()) return NetworkRecvStatus::Okay;
+#endif
 	Debug(Facility::Net, Severity::Trace3, "Client::SendRCon()");
 
 	auto p = std::make_unique<Packet>(my_client, PacketGameType::ClientRemoteConsoleCommand);
@@ -510,6 +537,9 @@ NetworkRecvStatus ClientNetworkGameSocketHandler::SendRCon(std::string_view pass
  */
 NetworkRecvStatus ClientNetworkGameSocketHandler::SendMove(CompanyID company)
 {
+#ifdef __EMSCRIPTEN__
+	if (BrowserReadOnly()) return NetworkRecvStatus::Okay;
+#endif
 	Debug(Facility::Net, Severity::Trace3, "Client::SendMove(): company={}", company);
 
 	auto p = std::make_unique<Packet>(my_client, PacketGameType::ClientMove);
@@ -588,7 +618,12 @@ NetworkRecvStatus ClientNetworkGameSocketHandler::ReceiveServerClientInfo(Packet
 
 		/* Make sure we're in the company the server tells us to be in,
 		 * for the rare case that we get moved while joining. */
-		if (client_id == _network_own_client_id) SetLocalCompany(!Company::IsValidID(playas) ? COMPANY_SPECTATOR : playas);
+		if (client_id == _network_own_client_id) {
+			SetLocalCompany(!Company::IsValidID(playas) ? COMPANY_SPECTATOR : playas);
+#ifdef __EMSCRIPTEN__
+			BrowserCompanyAssigned(playas);
+#endif
+		}
 
 		ci->client_playas = playas;
 		ci->client_name = std::move(name);
@@ -609,7 +644,13 @@ NetworkRecvStatus ClientNetworkGameSocketHandler::ReceiveServerClientInfo(Packet
 	/* We don't have this client_id yet, find an empty client_id, and put the data there */
 	ci = NetworkClientInfo::Create(client_id);
 	ci->client_playas = playas;
-	if (client_id == _network_own_client_id) this->SetInfo(ci);
+	if (client_id == _network_own_client_id) {
+		this->SetInfo(ci);
+#ifdef __EMSCRIPTEN__
+		SetLocalCompany(!Company::IsValidID(playas) ? COMPANY_SPECTATOR : playas);
+		BrowserCompanyAssigned(playas);
+#endif
+	}
 
 	ci->client_name = std::move(name);
 	ci->public_key = std::move(public_key);
@@ -662,6 +703,11 @@ static StringID GetLongNetworkErrorString(NetworkErrorCode error)
 NetworkRecvStatus ClientNetworkGameSocketHandler::ReceiveServerError(Packet &p)
 {
 	NetworkErrorCode error = static_cast<NetworkErrorCode>(p.Recv_uint8());
+#ifdef __EMSCRIPTEN__
+	if (error == NetworkErrorCode::CompanyMismatch) {
+		EM_ASM({ if (window.openttd_browser_join_failed) window.openttd_browser_join_failed(); });
+	}
+#endif
 	Debug(Facility::Net, Severity::Trace3, "Client::ReceiveServerError(): error={}", error);
 
 	StringID err = GetLongNetworkErrorString(error);
@@ -899,7 +945,12 @@ NetworkRecvStatus ClientNetworkGameSocketHandler::ReceiveServerMapDone(Packet &)
 	if (_network_join.company == COMPANY_NEW_COMPANY || !Company::IsValidID(_network_join.company)) {
 		SetLocalCompany(COMPANY_SPECTATOR, true);
 
+#ifdef __EMSCRIPTEN__
+		/* A vanished existing company must not become an implicit new company. */
+		if (_network_join.company == COMPANY_NEW_COMPANY) {
+#else
 		if (_network_join.company != COMPANY_SPECTATOR) {
+#endif
 			/* We have arrived and ready to start playing; send a command to make a new company;
 			 * the server will give us a client-id and let us in */
 			Debug(Facility::Net, Severity::Trace3, "Client::join_status = Registering");
@@ -913,6 +964,9 @@ NetworkRecvStatus ClientNetworkGameSocketHandler::ReceiveServerMapDone(Packet &)
 	}
 
 	SocialIntegration::EventEnterMultiplayer(Map::SizeX(), Map::SizeY());
+#ifdef __EMSCRIPTEN__
+	if (const auto *own = NetworkClientInfo::GetByClientID(_network_own_client_id); own != nullptr) BrowserCompanyAssigned(own->client_playas);
+#endif
 
 	return NetworkRecvStatus::Okay;
 }
@@ -1201,6 +1255,9 @@ NetworkRecvStatus ClientNetworkGameSocketHandler::ReceiveServerMove(Packet &p)
 
 	if (client_id == _network_own_client_id) {
 		SetLocalCompany(company_id);
+#ifdef __EMSCRIPTEN__
+		BrowserCompanyAssigned(company_id);
+#endif
 	}
 
 	return NetworkRecvStatus::Okay;
@@ -1295,7 +1352,12 @@ void NetworkClientsToSpectators(CompanyID cid)
 {
 	AutoRestoreBackup cur_company(_current_company, _current_company);
 	/* If our company is changing owner, go to spectators */
-	if (cid == _local_company) SetLocalCompany(COMPANY_SPECTATOR);
+	if (cid == _local_company) {
+		SetLocalCompany(COMPANY_SPECTATOR);
+#ifdef __EMSCRIPTEN__
+		BrowserCompanyAssigned(COMPANY_SPECTATOR);
+#endif
+	}
 
 	for (NetworkClientInfo *ci : NetworkClientInfo::Iterate()) {
 		if (ci->client_playas != cid) continue;
