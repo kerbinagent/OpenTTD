@@ -1818,8 +1818,12 @@ private:
 			}
 		}
 
-		/* Disable the chat button when there are no players in this company. */
+		/* API company players need not have a native network connection. */
+#ifdef __EMSCRIPTEN__
+		chat_button.disabled = !has_players && !Company::IsValidID(company_id);
+#else
 		chat_button.disabled = !has_players;
+#endif
 	}
 
 	/**

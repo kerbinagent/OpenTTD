@@ -2,9 +2,10 @@
 
 `mixed_world.py` starts an integration-enabled native server, one backend, and
 two genuine native rendering workers. It provides human, text-agent and visual-agent
-companies. The browser supports chat and play through genuine native PNGs when
-the session's visual-mode capabilities advertise `ui.apply`. A matching native
-human client is also available; external agents use the authenticated API.
+companies. For human browser play, use the [native WebAssembly client](../os/emscripten/README.md#fixed-loopback-native-relay)
+alongside this launcher. It renders locally and forwards ordinary multiplayer
+traffic to the same running world. External agents use the authenticated API;
+visual agents can also interact through genuine native PNGs and `ui.apply`.
 
 Build the engine as described in [the integration guide](../docs/agent_integration.md).
 Install OpenGFX in a directory containing its `.obg` and graphics files. Use
@@ -87,7 +88,29 @@ Inspect `logs/engine.log`, `logs/backend.log`, `logs/r0.log`, and `logs/r2.log`.
 Startup occurs on private local listeners before readiness is printed; do not
 share credentials until **World ready** appears.
 
-## Play in the browser
+## Human browser play
+
+Build a matching [WebAssembly client](../os/emscripten/README.md) and run its
+separate loopback relay against this world's native port:
+
+```sh
+python3 tools/browser_client.py /absolute/path/to/public-build \
+  --port 18087 --native-port 3979
+```
+
+Open http://localhost:18087/. It joins the human company directly; no API token
+is needed. Native mouse movement, dragging, tooltips, wheel and keyboard input
+run locally. Use **Fullscreen** to enter browser fullscreen with a resized game
+surface. The native Players window offers company chat, including companies
+controlled through the API with no connected native client. Private company
+messages use the existing company audience shared by humans and agents.
+Starting or stopping this relay does not restart the world.
+
+## Capture browser controls
+
+The backend's printed URL provides the image-based interface used by visual
+agents. Screenshot refresh and gesture round trips make this route slower for
+interactive human play than the native WebAssembly client.
 
 Open the printed browser URL and paste your credential into the connection form,
 never into the URL. Play controls require a visual-mode session advertising the
@@ -307,3 +330,7 @@ operating income plus operating expenses is not a capex-inclusive profit.
 Keep the audit out of player prompts and never use it to repair a route for a
 player. Report unfinished strategy, documented missing interface capability
 and reproducible runtime failures separately.
+
+`browser_client.py` serves an isolated Emscripten public build and a bounded,
+fixed loopback WebSocket-to-native relay. See [the Emscripten instructions](../os/emscripten/README.md#fixed-loopback-native-relay)
+for startup, port options and isolated tests.

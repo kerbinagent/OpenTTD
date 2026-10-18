@@ -1,5 +1,20 @@
 Module.arguments.push('-mnull', '-snull', '-vsdl');
+/* This public bootstrap is provided only by the fixed loopback relay. */
+var browserRelay = window.OPENTTD_BROWSER_RELAY;
+var localRelay = location.protocol === 'http:' &&
+    (location.hostname === '127.0.0.1' || location.hostname === 'localhost') &&
+    browserRelay && Number.isInteger(browserRelay.nativePort) &&
+    browserRelay.nativePort > 0 && browserRelay.nativePort <= 65535 &&
+    browserRelay.company === 1 && browserRelay.websocketPath === '/native';
+if (localRelay) {
+    Module.arguments.push('-n', '127.0.0.1:' + browserRelay.nativePort + '#1', '-I', 'OpenGFX');
+}
 Module['websocket'] = { url: function(host, port, proto) {
+    if (localRelay) {
+        return 'ws://' + location.host +
+            (host === '127.0.0.1' && Number(port) === browserRelay.nativePort && proto === 'tcp'
+                ? browserRelay.websocketPath : '/denied-native-destination');
+    }
     /* openttd.org hosts a WebSocket proxy for the content service. */
     if (host == "content.openttd.org" && port == 3978 && proto == "tcp") {
         return "wss://bananas-server.openttd.org/";
@@ -119,8 +134,10 @@ Module.preRun.push(function() {
    {
        let func = Module['websocket']['url'];
        Module['websocket']['url'] = func(addr, port, (sock.type == 2) ? 'udp' : 'tcp');
-       let ret = SOCKFS.websocket_sock_ops.createPeer_(sock, addr, port);
-       Module['websocket']['url'] = func;
-       return ret;
+       try {
+           return SOCKFS.websocket_sock_ops.createPeer_(sock, addr, port);
+       } finally {
+           Module['websocket']['url'] = func;
+       }
    }
 });
