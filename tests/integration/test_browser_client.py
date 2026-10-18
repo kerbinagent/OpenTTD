@@ -92,6 +92,36 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.server = TestServer(relay.create_app(self.root, self.port, api_port=self.metadata_server.port), port=self.port)
         await self.server.start_server()
 
+    async def test_zero_company_model_reports_need_no_operator_company(self):
+        calls = []
+
+        async def upstream(request):
+            calls.append((request.path, request.headers.get('Authorization')))
+            return aiohttp.web.json_response({'participants': [{
+                'company_id': 0, 'model_report': {
+                    'model_name': 'Test model', 'effort_level': 'high', 'self_reported': True}}]})
+
+        await self.enable_api(upstream)
+        async with self.session.get(self.base + '/browser-config.js') as response:
+            self.assertIn('"modelRoster": true', await response.text())
+        async with self.session.get(self.base + '/model-roster') as response:
+            self.assertEqual(response.status, 200)
+            payload = await response.json()
+        self.assertEqual(calls, [('/v1/model-reports', None)])
+        self.assertEqual(payload['participants'][0]['model_report']['model_name'], 'Test model')
+        self.assertEqual(set(payload['participants'][0]), {'company_id', 'display_name', 'kind', 'model_report'})
+
+    async def test_compact_model_reports_reject_additional_private_fields(self):
+        async def upstream(request):
+            return aiohttp.web.json_response({'participants': [{
+                'company_id': 0, 'identity_id': 'private', 'model_report': {
+                    'model_name': 'Test model', 'effort_level': 'high', 'self_reported': True}}]})
+
+        await self.enable_api(upstream)
+        async with self.session.get(self.base + '/model-roster') as response:
+            self.assertEqual(response.status, 503)
+            self.assertNotIn('private', await response.text())
+
     async def test_api_proxy_preserves_metadata_and_only_caller_credentials(self):
         calls = []
         async def upstream(request):

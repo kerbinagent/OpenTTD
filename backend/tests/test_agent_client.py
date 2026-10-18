@@ -44,18 +44,40 @@ class Handler(BaseHTTPRequestHandler):
         if getattr(self.server, "real_service", None) is not None:
             return self.delegate("POST", body)
         if self.path == "/v1/agent/join":
+            if "intent" in body and not self.server.dynamic:
+                return self.reply(400, {"error": {"code": "invalid_request", "message": "Invalid join shape"}})
             claim = self.headers.get("Authorization", "").removeprefix("Bearer ")
             saved = json.loads((self.server.state / "session.json").read_text())
             self.server.claim_durable.append(saved["claim"] == claim and len(claim) == 43)
+            if self.server.dynamic:
+                self.server.intent_durable.append(saved.get("create_intent", {}).get("name") == "Harbor Transit"
+                    and len(saved.get("create_intent", {}).get("request_id", "")) == 32)
+            if self.server.admission_error_code is not None:
+                code = claim if self.server.admission_error_code == "echo_bearer" else self.server.admission_error_code
+                return self.reply(503, {"error": {"code": code, "message": claim}})
             self.server.claims.add(claim)
             if self.server.lose_join_reply:
                 self.server.lose_join_reply = False
                 self.connection.shutdown(socket.SHUT_RDWR)
                 self.connection.close()
                 return
+            if self.server.dynamic:
+                return self.reply(200, {"api_version": "v1", **BINDING, "mode": body["mode"],
+                    "token": claim, "world_epoch": "test-epoch", "registration_id": BINDING["run_id"]})
             return self.reply(200, {"api_version": "v1", **BINDING, "mode": body["mode"], "token": "private-game-token"})
         if self.path == "/v1/actions":
             self.server.actions.append(deepcopy(body))
+            if self.server.dynamic:
+                saved = self.server.state / "requests" / (body["request_id"] + ".json")
+                self.server.rename_durable.append(json.loads(saved.read_text()) == body)
+                self.server.receipts.setdefault(body["request_id"], {
+                    "request_id": body["request_id"], **deepcopy(self.server.action_receipt)})
+                if self.server.lose_action_reply:
+                    self.server.lose_action_reply = False
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    self.connection.close()
+                    return
+                return self.reply(200, self.server.receipts[body["request_id"]])
             return self.reply(200, {"request_id": body["request_id"], "status": "completed", "result": {"cost": 75}})
         return self.reply(404, {"error": {"code": "not_found", "message": "Not found"}})
 
@@ -64,9 +86,17 @@ class Handler(BaseHTTPRequestHandler):
         if getattr(self.server, "real_service", None) is not None:
             return self.delegate("GET")
         if self.path == "/v1/me":
+            if self.server.me_error_code is not None:
+                bearer = self.headers.get("Authorization", "").removeprefix("Bearer ")
+                code = bearer if self.server.me_error_code == "echo_bearer" else self.server.me_error_code
+                return self.reply(503, {"error": {"code": code, "message": bearer}})
             if self.server.fail_me:
                 return self.reply(503, {"error": {"code": "unavailable", "message": "private-game-token"}})
             self.server.me_auth.append(self.headers.get("Authorization"))
+            if self.server.dynamic:
+                saved = json.loads((self.server.state / "session.json").read_text())
+                return self.reply(200, {**BINDING, "mode": saved["mode"], "kind": "agent",
+                    "world_epoch": self.server.me_epoch, "registration_id": BINDING["run_id"]})
             return self.reply(200, {**BINDING, "kind": "agent"})
         return self.reply(200, {"ok": True})
 
@@ -89,6 +119,12 @@ class AgentClientTest(unittest.TestCase):
         self.server.calls, self.server.actions, self.server.claim_durable = [], [], []
         self.server.claims, self.server.me_auth = set(), []
         self.server.lose_join_reply, self.server.fail_me = False, False
+        self.server.dynamic, self.server.lose_action_reply = False, False
+        self.server.admission_error_code, self.server.me_error_code = None, None
+        self.server.me_epoch = "test-epoch"
+        self.server.intent_durable, self.server.rename_durable = [], []
+        self.server.receipts = {}
+        self.server.action_receipt = {"status": "completed", "result": {"success": True, "cost": 0}}
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(self.server.server_close)
@@ -114,6 +150,160 @@ class AgentClientTest(unittest.TestCase):
         counts = json.loads((self.state / "http-counts.json").read_text())
         self.assertEqual(counts["attempts"], 2)
         self.assertEqual(AgentClient.open(self.state).binding, BINDING)
+
+    def new(self, **changes):
+        self.server.dynamic = True
+        return AgentClient.new(changes.get("origin", self.origin), self.state,
+                               changes.get("mode", "text"), changes.get("name", "Harbor Transit"))
+
+    def test_explicit_new_persists_immutable_intent_and_exact_name_before_http(self):
+        player = self.new()
+        self.assertEqual(player.setup["operation"], "new")
+        self.assertEqual(player.setup["binding"], BINDING)
+        self.assertEqual(player.setup["world_epoch"], "test-epoch")
+        self.assertEqual(player.setup["registration_id"], BINDING["run_id"])
+        self.assertTrue(player.setup["naming"]["success"])
+        self.assertEqual(self.server.intent_durable, [True])
+        self.assertEqual(self.server.rename_durable, [True])
+        self.assertEqual(self.server.calls[0], ("POST", "/v1/agent/join", {"mode": "text", "intent": "new"}))
+        saved = json.loads((self.state / "session.json").read_text())
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["token"], saved["claim"])
+        self.assertEqual(self.server.actions[0]["request_id"], saved["create_intent"]["request_id"])
+        self.assertEqual(self.server.actions[0]["action"], {"name": "company.rename", "parameters": {"name": "Harbor Transit"}})
+        self.assertNotIn(saved["claim"], json.dumps(player.setup))
+        self.assertNotIn(saved["claim"], (self.state / "public-io.jsonl").read_text())
+
+    def test_new_rejects_legacy_pool_without_consuming_a_reserved_claim(self):
+        with self.assertRaises(BackendError) as caught:
+            AgentClient.new(self.origin, self.state, "text", "Harbor Transit")
+        self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(self.server.claims, set())
+        self.assertTrue((self.state / "session.json").is_file())
+
+    def test_new_exact_recovery_keeps_one_claim_binding_and_name_action(self):
+        self.server.lose_join_reply = True
+        with self.assertRaises(OSError):
+            self.new()
+        with self.assertRaises(ValueError):
+            AgentClient.resume(self.state)
+        self.assertEqual(len(self.server.calls), 1)
+        player = self.new()
+        replay = self.new()
+        self.assertEqual(replay.setup["operation"], "recovered_new")
+        self.assertEqual(player.binding, replay.binding)
+        self.assertEqual(len(self.server.claims), 1)
+        self.assertEqual(len(self.server.receipts), 1)
+        self.assertEqual(self.server.actions[0], self.server.actions[1])
+        self.assertEqual(self.server.intent_durable, [True, True])
+
+    def test_new_refuses_different_intent_legacy_and_unrelated_state_before_http(self):
+        self.new()
+        calls = len(self.server.calls)
+        for changes in ({"mode": "visual"}, {"name": "Different Name"}, {"origin": "http://localhost:1"}):
+            with self.assertRaises(ValueError):
+                self.new(**changes)
+        with self.assertRaises(ValueError):
+            AgentClient.join(self.origin, self.state, "text")
+        self.assertEqual(len(self.server.calls), calls)
+        other = Path(self.tmp.name) / "unrelated"
+        other.mkdir(mode=0o700)
+        (other / "notes.txt").write_text("existing work")
+        with self.assertRaises(ValueError):
+            AgentClient.new(self.origin, other, "text", "Harbor Transit")
+        self.assertEqual({p.name for p in other.iterdir()}, {"notes.txt"})
+        self.assertEqual(len(self.server.calls), calls)
+
+    def test_substituted_or_nonstring_dynamic_token_is_rejected_before_http(self):
+        self.new()
+        original = json.loads((self.state / "session.json").read_text())
+        self.server.calls.clear()
+        for token in ("different-capability", None, 123):
+            with self.subTest(token_type=type(token).__name__):
+                (self.state / "session.json").write_text(json.dumps({**original, "token": token}))
+                for command in (self.new, lambda: AgentClient.resume(self.state), lambda: AgentClient.open(self.state)):
+                    with self.assertRaises(ValueError):
+                        command()
+                self.assertEqual(self.server.calls, [])
+        (self.state / "session.json").write_text(json.dumps(original))
+        self.assertEqual(AgentClient.resume(self.state).binding, BINDING)
+
+    def test_new_local_name_limits_reject_before_any_company_admission(self):
+        for value in ("", "a" * 32, "bad\x00name", None):
+            with self.assertRaises(ValueError):
+                self.new(name=value)
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.server.calls, [])
+        self.assertTrue(self.new(name="🚂" * 31).setup["naming"]["success"])
+
+    def test_resume_is_read_only_and_accepts_saved_token_before_first_verification(self):
+        self.server.fail_me = True
+        with self.assertRaises(BackendError):
+            self.new()
+        saved = json.loads((self.state / "session.json").read_text())
+        self.assertFalse(saved["verified"])
+        self.assertEqual(self.server.actions, [])
+        self.server.fail_me = False
+        self.server.calls.clear()
+        with patch("backend.agent_client.secrets.token_urlsafe", side_effect=AssertionError("no new secret")):
+            player = AgentClient.resume(self.state)
+        self.assertEqual(self.server.calls, [("GET", "/v1/me", None)])
+        self.assertEqual(player.setup["operation"], "resumed")
+        self.assertEqual(player.setup["naming"]["status"], "not_started")
+        self.assertEqual(self.server.actions, [])
+        self.assertTrue(AgentClient.open(self.state).session["verified"])
+
+    def test_resume_missing_state_and_world_mismatch_never_create(self):
+        with self.assertRaises(FileNotFoundError):
+            AgentClient.resume(self.state)
+        self.assertFalse(self.state.exists())
+        self.new()
+        self.server.calls.clear()
+        self.server.me_epoch = "replacement-epoch"
+        with self.assertRaises(ValueError):
+            AgentClient.resume(self.state)
+        self.assertEqual(self.server.calls, [("GET", "/v1/me", None)])
+        self.assertEqual(len(self.server.claims), 1)
+
+    def test_legacy_state_resumes_without_admission_or_rename(self):
+        self.join()
+        self.server.calls.clear()
+        with self.assertRaises(ValueError):
+            AgentClient.new(self.origin, self.state, "text", "Harbor Transit")
+        self.assertEqual(self.server.calls, [])
+        player = AgentClient.resume(self.state)
+        self.assertEqual(player.binding, BINDING)
+        self.assertEqual(player.setup["operation"], "resumed")
+        self.assertEqual(self.server.calls, [("GET", "/v1/me", None)])
+
+    def test_lost_initial_name_reply_keeps_known_company_and_exact_recovery(self):
+        self.server.lose_action_reply = True
+        player = self.new()
+        self.assertEqual(player.binding, BINDING)
+        self.assertEqual(player.setup["naming"]["status"], "transport_unknown")
+        action = deepcopy(self.server.actions[0])
+        self.server.calls.clear()
+        resumed = AgentClient.resume(self.state)
+        self.assertEqual(resumed.setup["naming"]["status"], "transport_unknown")
+        self.assertEqual(self.server.calls, [("GET", "/v1/me", None)])
+        recovered = self.new()
+        self.assertTrue(recovered.setup["naming"]["success"])
+        self.assertEqual(self.server.actions, [action, action])
+        self.assertEqual(len(self.server.receipts), 1)
+        self.assertEqual(len(self.server.claims), 1)
+
+    def test_native_name_rejection_or_uncertain_result_keeps_ownership(self):
+        self.server.action_receipt = {"status": "completed", "result": {"success": False, "error": "Name is in use"}}
+        player = self.new()
+        self.assertFalse(player.setup["naming"]["success"])
+        self.assertEqual(player.setup["naming"]["error"], "Name is in use")
+        self.assertEqual(AgentClient.resume(self.state).binding, BINDING)
+        self.assertEqual(len(self.server.claims), 1)
+        self.server.receipts.clear()
+        self.server.action_receipt = {"status": "uncertain"}
+        player = self.new()
+        self.assertEqual(player.setup["naming"]["status"], "uncertain")
+        self.assertEqual(len(self.server.claims), 1)
 
     def test_generated_claim_works_with_actual_admission_and_store_contract(self):
         from backend.tests.test_admission import AdmissionTests
@@ -285,6 +475,54 @@ class AgentClientTest(unittest.TestCase):
                 patch("backend.agent_client.time.sleep") as sleep:
             player.wait("pending", wait_ms=20_000)
             sleep.assert_called_once_with(0.5)
+
+    def test_cli_errors_hide_bearer_codes_for_new_and_resume_preserving_recovery_codes(self):
+        self.server.dynamic = True
+        self.server.admission_error_code = "echo_bearer"
+        # A canonical all-lowercase claim also resembles an ordinary error
+        # identifier, so a shape check alone cannot protect the CLI boundary.
+        with patch("backend.agent_client.secrets.token_urlsafe", return_value="a" * 42 + "c"):
+            with self.assertRaises(BackendError):
+                self.new()
+        secret = json.loads((self.state / "session.json").read_text())["claim"]
+        command = [sys.executable, "-S", "-m", "backend.agent_client", "--state", str(self.state)]
+        creation = ["new", "--origin", self.origin, "--mode", "text", "--name", "Harbor Transit"]
+        result = subprocess.run(command + creation, cwd=ROOT, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn(secret, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stderr)["error"], {"status": 503, "code": "backend_error"})
+        self.server.admission_error_code = "join_not_ready"
+        result = subprocess.run(command + creation, cwd=ROOT, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stderr)["error"]["code"], "join_not_ready")
+        self.assertNotIn(secret, result.stdout + result.stderr)
+        self.server.admission_error_code = None
+        self.new()
+        self.server.me_error_code = "echo_bearer"
+        self.server.calls.clear()
+        result = subprocess.run(command + ["resume"], cwd=ROOT, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stderr)["error"], {"status": 503, "code": "backend_error"})
+        self.assertNotIn(secret, result.stdout + result.stderr)
+        self.assertEqual(self.server.calls, [("GET", "/v1/me", None)])
+
+    def test_cli_new_and_resume_have_safe_explicit_outputs(self):
+        self.server.dynamic = True
+        command = [sys.executable, "-S", "-m", "backend.agent_client", "--state", str(self.state)]
+        result = subprocess.run(command + ["new", "--origin", self.origin, "--mode", "visual", "--name", "Harbor Transit"],
+                                cwd=ROOT, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        setup = json.loads(result.stdout)
+        self.assertEqual(setup["operation"], "new")
+        self.assertEqual(setup["binding"]["mode"], "visual")
+        secret = json.loads((self.state / "session.json").read_text())["claim"]
+        self.assertNotIn(secret, result.stdout + result.stderr)
+        self.server.calls.clear()
+        result = subprocess.run(command + ["resume"], cwd=ROOT, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["operation"], "resumed")
+        self.assertEqual(self.server.calls, [("GET", "/v1/me", None)])
+        self.assertNotIn(secret, result.stdout + result.stderr)
 
     def test_stdlib_cli_from_copied_bundle_outside_repository(self):
         extracted = Path(self.tmp.name) / "download"

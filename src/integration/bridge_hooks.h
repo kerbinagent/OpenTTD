@@ -32,6 +32,8 @@ void CommandPostTestFailed(Commands command, const CommandCost &cost);
 bool ValidateQueuedCommand(uint64_t token, Commands command);
 void BeginCommand(uint64_t token);
 void EndCommand();
+/** Observe the actual native company allocated by the executing internal request. */
+void CompanyCreated(CompanyID company);
 /** Exact text presentation selected by the executing request; no new answer state. */
 std::optional<uint64_t> ExecutingQuestionGeneration(CompanyID company, uint16_t question_id);
 void CommandCompleted(Commands command, const CommandCost &cost, const CommandDataBuffer &returned);

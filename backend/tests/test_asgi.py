@@ -130,6 +130,23 @@ class ASGITransportTests(unittest.IsolatedAsyncioTestCase):
         status, _, _ = await call(self.app, headers=((b"authorization", b"Bearer other"),))
         self.assertEqual(status, 401)
 
+    async def test_only_exact_get_model_reports_is_anonymous(self):
+        store = Store(":memory:", world_id="public-world")
+        store.ensure_world("public-world", "epoch")
+        service = Service(store, None, autostart=False, world_id="public-world")
+        self.addCleanup(service.close)
+        self.addCleanup(store.close)
+        app = asgi.create_app(service)
+        status, body, _ = await call(app, "/v1/model-reports", token=None)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"participants": []})
+        for method, path, raw in (("POST", "/v1/model-reports", None),
+                                  ("GET", "/v1/model-reports/", None),
+                                  ("GET", "/v1/model-reports", b"/v1/model%2Dreports"),
+                                  ("GET", "/v1/participants", None)):
+            status, _, _ = await call(app, path, method=method, raw_path=raw, token=None)
+            self.assertEqual(status, 401)
+
     async def test_json_validation_query_and_error_redaction(self):
         for body in (b"[]", b'{"x":1,"x":2}', b'{"x":NaN}', b"{"):
             with self.subTest(body=body):

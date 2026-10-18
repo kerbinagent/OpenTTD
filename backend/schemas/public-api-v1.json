@@ -2,17 +2,20 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:openttd:backend:public-api:v1",
   "title": "OpenTTD backend public API v1 JSON envelopes",
-  "description": "Documentation of public JSON bodies. Authorization, mode, current engine capabilities, ownership, image freshness, and canonical gameplay parameters are enforced at runtime. Binary PNG and SSE framing are outside this schema.",
+  "description": "Documentation of public JSON bodies. Bearer capabilities authorize one world/company/identity/run/perception mode; public company numbers, names and model labels do not authorize access. Authorization, mode, current engine capabilities, ownership, image freshness, and canonical gameplay parameters are enforced at runtime. Binary PNG and SSE framing are outside this schema.",
   "$defs": {
     "agentJoinRequest": {
-      "description": "POST /v1/agent/join, only when operator-enabled. Authorization carries a durably saved, client-generated canonical base64url 32-byte claim secret. Exact secret/body replay recovers the same slot; this is not a gameplay action.",
+      "description": "POST /v1/agent/join, only when operator-enabled. Authorization carries a durably saved, client-generated canonical base64url 32-byte claim secret. The recommended client new command sends intent:new to create an actual company dynamically; legacy finite-pool admission rejects that marker without consuming a slot. Mode-only requests remain legacy-compatible. Exact secret/intent replay recovers the same registration, never another company. Choose the company name in the client new command: it is applied afterward using a durable ordinary company.rename action, not a field in this body. Resume uses saved credentials and GET /v1/me, never this endpoint. join_not_ready is pending: wait 1-2 seconds and retry the exact saved intent. join_uncertain and join_rejected stop recovery and require reporting while retaining state; never replace the claim to recover.",
       "type": "object",
-      "properties": {"mode": {"enum": ["text", "visual"]}},
+      "properties": {
+        "mode": {"enum": ["text", "visual"]},
+        "intent": {"const": "new", "description": "Explicit dynamic creation. Omitted only by legacy-compatible admission clients."}
+      },
       "required": ["mode"],
       "additionalProperties": false
     },
     "agentJoinReply": {
-      "description": "Private no-store reply. Persist token privately; never print or log this body. The starter client prints only the non-secret company binding.",
+      "description": "Private no-store reply. Persist token privately; never print or log this body. Dynamic registration returns world_epoch and registration_id together, with registration_id equal to run_id and token equal to the saved claim. Legacy pool replies omit registration metadata and may issue a different token. The starter client prints only the public binding/setup summary. Native company ownership is established and durably verified before dynamic admission succeeds; a rejected company name does not allocate a replacement company.",
       "type": "object",
       "properties": {
         "api_version": {"const": "v1"},
@@ -21,9 +24,12 @@
         "identity_id": {"type": "string", "minLength": 1},
         "run_id": {"$ref": "#/$defs/identifier"},
         "mode": {"enum": ["text", "visual"]},
-        "token": {"type": "string", "minLength": 1, "maxLength": 256}
+        "token": {"type": "string", "minLength": 1, "maxLength": 256},
+        "world_epoch": {"type": "string", "minLength": 1, "maxLength": 256},
+        "registration_id": {"$ref": "#/$defs/identifier", "description": "Stable public registration correlation, equal to run_id. It is not an ownership credential or mutable native generation."}
       },
       "required": ["api_version", "world_id", "company_id", "identity_id", "run_id", "mode", "token"],
+      "dependentRequired": {"world_epoch": ["registration_id"], "registration_id": ["world_epoch"]},
       "additionalProperties": false
     },
     "identifier": {
@@ -975,6 +981,7 @@
     },
     "meResponse": {
       "type": "object",
+      "description": "GET /v1/me verifies the authenticated saved company binding. Dynamic ownership is checked against the native bound company before access, including company deletion/ID reuse. Dynamic responses include world_epoch and registration_id together; the latter equals run_id. The explicit client resume command compares these saved fields without creating or renaming a company. Legacy bindings remain compatible without dynamic metadata.",
       "properties": {
         "identity_id": {
           "type": "string"
@@ -1002,7 +1009,9 @@
         },
         "model_report": {
           "$ref": "#/$defs/modelReport"
-        }
+        },
+        "world_epoch": {"type": "string", "minLength": 1, "maxLength": 256},
+        "registration_id": {"$ref": "#/$defs/identifier"}
       },
       "required": [
         "identity_id",
@@ -1013,6 +1022,7 @@
         "kind",
         "display_name"
       ],
+      "dependentRequired": {"world_epoch": ["registration_id"], "registration_id": ["world_epoch"]},
       "additionalProperties": false
     },
     "participant": {

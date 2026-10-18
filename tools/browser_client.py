@@ -107,7 +107,7 @@ def read_metadata_token(path):
     return token.decode('ascii')
 
 
-def model_roster(payload):
+def model_roster(payload, *, compact=False):
     """Public display labels only: no identities, run handles or credentials."""
     people = payload.get('participants') if isinstance(payload, dict) else None
     if not isinstance(people, list) or len(people) > 100:
@@ -116,6 +116,10 @@ def model_roster(payload):
     for person in people:
         if not isinstance(person, dict):
             raise ValueError('invalid participant')
+        if compact:
+            if set(person) != {'company_id', 'model_report'}:
+                raise ValueError('invalid model report row')
+            person = {**person, 'display_name': 'Agent', 'kind': 'agent'}
         company = person.get('company_id')
         name, kind = person.get('display_name'), person.get('kind')
         valid_company = company is None or (type(company) is int and company in (*range(15), 255))
@@ -142,6 +146,7 @@ def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, meta
     if (metadata_port is None) != (metadata_token_file is None):
         raise ValueError('metadata port and token file must be provided together')
     metadata_token = read_metadata_token(metadata_token_file) if metadata_port is not None else None
+    report_port = metadata_port if metadata_port is not None else api_port
     if world_id is not None and (not isinstance(world_id, str) or not 1 <= len(world_id) <= 128
                                  or not all(c.isalnum() or c in '-_.' for c in world_id)):
         raise ValueError('world identity must be a bounded identifier')
@@ -184,7 +189,7 @@ def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, meta
             return await handler(request)
         routes = {'/', '/browser-config.js', '/native'} | {'/' + name for name in ASSETS | ENTRY_ASSETS.keys()}
         routes.update(agent_assets)
-        if metadata_port is not None:
+        if report_port is not None:
             routes.add('/model-roster')
         if request.query_string or '%' in request.raw_path or request.path not in routes:
             raise web.HTTPNotFound()
@@ -199,7 +204,7 @@ def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, meta
         if request.path == '/browser-config.js':
             host = request.host.split(':')[0]
             local_api = 'http://' + request.host if api_port is not None and request.host in {f'127.0.0.1:{port}', f'localhost:{port}', f'{bind_host}:{port}'} else None
-            config = {'nativePort': native_port, 'websocketPath': '/native', 'modelRoster': metadata_port is not None,
+            config = {'nativePort': native_port, 'websocketPath': '/native', 'modelRoster': report_port is not None,
                       'worldId': world_id, 'publicOrigin': public_origin,
                       'apiOrigin': public_api_origin or local_api}
             return web.Response(text='window.OPENTTD_BROWSER_RELAY=' + json.dumps(config) + ';\n', content_type='application/javascript')
@@ -271,8 +276,8 @@ def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, meta
     async def metadata(request):
         try:
             async with app[METADATA_SESSION].get(
-                f'http://127.0.0.1:{metadata_port}/v1/participants',
-                headers={'Authorization': 'Bearer ' + metadata_token}, allow_redirects=False,
+                f'http://127.0.0.1:{report_port}/v1/' + ('participants' if metadata_token else 'model-reports'),
+                headers={'Authorization': 'Bearer ' + metadata_token} if metadata_token else {}, allow_redirects=False,
             ) as response:
                 if response.status != 200:
                     raise ValueError('metadata unavailable')
@@ -281,7 +286,7 @@ def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, meta
                     body.extend(chunk)
                     if len(body) > METADATA_LIMIT:
                         raise ValueError('metadata too large')
-                payload = model_roster(json.loads(body))
+                payload = model_roster(json.loads(body), compact=metadata_token is None)
         except (ClientError, TimeoutError, ValueError, UnicodeError):
             raise web.HTTPServiceUnavailable(text='Model reports unavailable')
         return web.json_response(payload)
@@ -353,7 +358,7 @@ def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, meta
     app = web.Application(middlewares=[guard], client_max_size=API_BODY_LIMIT + 1)
     app.on_response_prepare.append(headers)
     app.on_shutdown.append(shutdown)
-    if metadata_port is not None:
+    if report_port is not None:
         app.cleanup_ctx.append(metadata_session)
         app.router.add_route('*', '/model-roster', metadata)
     if api_port is not None:

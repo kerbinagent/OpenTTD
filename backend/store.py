@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -16,6 +17,7 @@ import time
 from typing import Any, Iterator
 
 from .errors import ServiceError
+from .json_tools import dumps
 
 
 @dataclass(frozen=True)
@@ -123,6 +125,24 @@ class Store:
                     created_at REAL NOT NULL,
                     PRIMARY KEY (world_id, claim_hash)
                 );
+                CREATE TABLE IF NOT EXISTS company_registrations (
+                    world_id TEXT NOT NULL REFERENCES worlds(id),
+                    claim_hash TEXT NOT NULL,
+                    world_epoch TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    identity_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL UNIQUE,
+                    allocation_request_id TEXT NOT NULL,
+                    allocation_request_sequence INTEGER NOT NULL,
+                    worker_slot TEXT,
+                    worker_public_key TEXT,
+                    worker_request_id TEXT,
+                    company_id INTEGER,
+                    ready INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (world_id, claim_hash),
+                    UNIQUE (world_id, worker_slot)
+                );
                 CREATE TABLE IF NOT EXISTS action_requests (
                     world_id TEXT NOT NULL,
                     identity_id TEXT NOT NULL,
@@ -217,6 +237,10 @@ class Store:
             self.connection.execute("ALTER TABLE checkpoints ADD COLUMN retired_through INTEGER")
         if "save_checksum" not in columns("checkpoints"):
             self.connection.execute("ALTER TABLE checkpoints ADD COLUMN save_checksum TEXT")
+        if "worker_request_id" not in columns("company_registrations"):
+            self.connection.execute("ALTER TABLE company_registrations ADD COLUMN worker_request_id TEXT")
+        if "worker_public_key" not in columns("company_registrations"):
+            self.connection.execute("ALTER TABLE company_registrations ADD COLUMN worker_public_key TEXT")
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             for world in self.connection.execute("SELECT id,next_request_sequence FROM worlds").fetchall():
@@ -279,6 +303,16 @@ class Store:
         if self.single_world_id is not None and world_id != self.single_world_id:
             raise ServiceError("world_scope", "Wrong world for this database", 409)
 
+    def ensure_world(self, world_id: str, world_epoch: str) -> None:
+        """Initialize a world without provisioning a company or credential."""
+        self._ensure_world(world_id)
+        if not all(isinstance(value, str) and value for value in (world_id, world_epoch)):
+            raise ServiceError("invalid_world")
+        with self._transaction() as db:
+            db.execute("INSERT OR IGNORE INTO worlds(id,epoch) VALUES (?,?)", (world_id, world_epoch))
+            if db.execute("SELECT epoch FROM worlds WHERE id=?", (world_id,)).fetchone()["epoch"] != world_epoch:
+                raise ServiceError("epoch_conflict", "World epoch differs", 409)
+
     @staticmethod
     def _principal(row: sqlite3.Row) -> Principal:
         return Principal(
@@ -312,7 +346,7 @@ class Store:
         world_epoch: str = "initial",
     ) -> str:
         self._ensure_world(world_id)
-        if identity_id == "__backend_chat__":
+        if identity_id in ("__backend_chat__", "__backend_registration__"):
             raise ServiceError("invalid_identity", "Reserved identity")
         if not all(isinstance(x, str) and x for x in (world_id, identity_id, mode, kind, world_epoch)):
             raise ServiceError("invalid_identity", "Identity fields must be nonempty strings")
@@ -403,6 +437,231 @@ class Store:
                 "SELECT run_id FROM agent_join_claims WHERE world_id=?", (world_id,),
             ).fetchall()
         return {row["run_id"] for row in rows}
+
+    @staticmethod
+    def _registration(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["ready"] = bool(result["ready"])
+        result["registration_id"] = result["run_id"]
+        return result
+
+    def registration(self, world_id: str, claim_hash: str) -> dict[str, Any] | None:
+        self._ensure_world(world_id)
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT * FROM company_registrations WHERE world_id=? AND claim_hash=?",
+                (world_id, claim_hash),
+            ).fetchone()
+        return self._registration(row) if row else None
+
+    def registration_for_run(self, run_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT * FROM company_registrations WHERE run_id=?", (run_id,),
+            ).fetchone()
+        if row:
+            self._ensure_world(row["world_id"])
+        return self._registration(row) if row else None
+
+    def registrations(self, world_id: str) -> list[dict[str, Any]]:
+        self._ensure_world(world_id)
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT * FROM company_registrations WHERE world_id=? ORDER BY created_at,run_id",
+                (world_id,),
+            ).fetchall()
+        return [self._registration(row) for row in rows]
+
+    def bind_registration_worker_key(self, world_id: str, claim_hash: str, key: str) -> dict[str, Any]:
+        """Pin the private worker identity before authorizing any connection handle."""
+        self._ensure_world(world_id)
+        if not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{64}", key) is None:
+            raise ServiceError("invalid_worker_key")
+        with self._transaction() as db:
+            registration = db.execute(
+                "SELECT * FROM company_registrations WHERE world_id=? AND claim_hash=?", (world_id, claim_hash),
+            ).fetchone()
+            if registration is None:
+                raise ServiceError("not_found", "Registration not found", 404)
+            if registration["mode"] != "visual" or registration["worker_slot"] is None:
+                raise ServiceError("forbidden", "Worker binding is unavailable", 403)
+            if registration["worker_public_key"] is not None:
+                if registration["worker_public_key"] != key:
+                    raise ServiceError("join_worker_changed", status=409)
+                return self._registration(registration)
+            if registration["ready"]:
+                raise ServiceError("forbidden", "Worker binding is unavailable", 403)
+            db.execute("UPDATE company_registrations SET worker_public_key=? WHERE world_id=? AND claim_hash=?",
+                       (key, world_id, claim_hash))
+            return self._registration(db.execute(
+                "SELECT * FROM company_registrations WHERE world_id=? AND claim_hash=?", (world_id, claim_hash),
+            ).fetchone())
+
+    def prepare_registration(
+        self, world_id: str, world_epoch: str, claim_hash: str, mode: str,
+        worker_slots: tuple[str, ...] | list[str],
+    ) -> dict[str, Any]:
+        """Atomically reserve immutable setup, visual capacity and the native outbox."""
+        self._ensure_world(world_id)
+        if not isinstance(claim_hash, str) or re.fullmatch(r"[0-9a-f]{64}", claim_hash) is None:
+            raise ServiceError("invalid_claim")
+        if mode not in ("text", "visual"):
+            raise ServiceError("invalid_mode")
+        if (not isinstance(worker_slots, (tuple, list)) or len(worker_slots) > 256
+                or any(not isinstance(slot, str) or not 1 <= len(slot) <= 128
+                       or not slot.isprintable() for slot in worker_slots)
+                or len(set(worker_slots)) != len(worker_slots)):
+            raise ServiceError("invalid_worker_slots")
+        with self._transaction() as db:
+            world = db.execute("SELECT epoch,recovery_state FROM worlds WHERE id=?", (world_id,)).fetchone()
+            if world is None:
+                raise ServiceError("not_found", "World not found", 404)
+            if world["epoch"] != world_epoch:
+                raise ServiceError("epoch_conflict", "World epoch differs", 409)
+            existing = db.execute(
+                "SELECT * FROM company_registrations WHERE world_id=? AND claim_hash=?",
+                (world_id, claim_hash),
+            ).fetchone()
+            if existing is not None:
+                if existing["mode"] != mode or existing["world_epoch"] != world_epoch:
+                    raise ServiceError("join_conflict", status=409)
+                if existing["worker_slot"] is not None and existing["worker_slot"] not in worker_slots:
+                    raise ServiceError("registration_worker_unavailable", status=503)
+                return self._registration(existing)
+            if world["recovery_state"] != "ready":
+                raise ServiceError("world_recovering", status=503)
+            if db.execute(
+                "SELECT 1 FROM agent_join_claims WHERE world_id=? AND claim_hash=?",
+                (world_id, claim_hash),
+            ).fetchone() or db.execute("SELECT 1 FROM credentials WHERE token_hash=?", (claim_hash,)).fetchone():
+                raise ServiceError("join_conflict", status=409)
+            pending = db.execute(
+                "SELECT COUNT(*) FROM company_registrations r JOIN action_requests a "
+                "ON a.world_id=r.world_id AND a.request_sequence=r.allocation_request_sequence "
+                "WHERE r.world_id=? AND r.ready=0 AND a.status NOT IN ('rejected','resolved_rolled_back')",
+                (world_id,),
+            ).fetchone()[0]
+            if pending >= 15:
+                raise ServiceError("registration_capacity", "Pending registration capacity reached", 429)
+            slot = None
+            if mode == "visual":
+                used = {row["worker_slot"] for row in db.execute(
+                    "SELECT worker_slot FROM company_registrations WHERE world_id=? AND worker_slot IS NOT NULL",
+                    (world_id,),
+                )}
+                slot = next((candidate for candidate in worker_slots if candidate not in used), None)
+                if slot is None:
+                    raise ServiceError("visual_capacity", "Capture worker capacity reached", 429)
+            run_id = "registration-" + secrets.token_hex(16)
+            identity_id = "agent:" + run_id
+            request_id = "registration:" + run_id
+            record = self.reserve_internal_in_transaction(db, world_id, request_id, {
+                "rpc_type": "company.register",
+                "owner": {"identity_id": identity_id, "run_id": run_id, "mode": mode},
+            })
+            db.execute(
+                "INSERT INTO company_registrations(world_id,claim_hash,world_epoch,mode,identity_id,run_id,"
+                "allocation_request_id,allocation_request_sequence,worker_slot,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (world_id, claim_hash, world_epoch, mode, identity_id, run_id, request_id,
+                 record["request_sequence"], slot, time.time()),
+            )
+            return self._registration(db.execute(
+                "SELECT * FROM company_registrations WHERE world_id=? AND claim_hash=?",
+                (world_id, claim_hash),
+            ).fetchone())
+
+    @staticmethod
+    def _registration_allocation(db: sqlite3.Connection, registration: sqlite3.Row, company_id: int) -> sqlite3.Row:
+        row = db.execute(
+            "SELECT * FROM action_requests WHERE world_id=? AND identity_id='__backend_registration__' "
+            "AND request_id=? AND request_sequence=?",
+            (registration["world_id"], registration["allocation_request_id"],
+             registration["allocation_request_sequence"]),
+        ).fetchone()
+        result = _decode(row["result"]) if row is not None else None
+        owner = {"identity_id": registration["identity_id"], "run_id": registration["run_id"],
+                 "mode": registration["mode"], "company_id": company_id}
+        if (row is None or row["status"] != "completed" or not isinstance(result, dict)
+                or result.get("owner") != owner or result.get("owner_bound") is not True
+                or type(result.get("company_id")) is not int or result["company_id"] != company_id):
+            raise ServiceError("join_not_ready", status=503)
+        return row
+
+    def provisional_registration(self, world_id: str, claim_hash: str, company_id: int) -> Principal:
+        """Publish a broker-only owner run after allocation; no bearer exists yet."""
+        self._ensure_world(world_id)
+        if type(company_id) is not int or not 0 <= company_id <= 14:
+            raise ServiceError("invalid_company")
+        with self._transaction() as db:
+            registration = db.execute(
+                "SELECT * FROM company_registrations WHERE world_id=? AND claim_hash=?", (world_id, claim_hash),
+            ).fetchone()
+            if registration is None:
+                raise ServiceError("not_found", "Registration not found", 404)
+            if registration["company_id"] is not None and registration["company_id"] != company_id:
+                raise ServiceError("join_conflict", status=409)
+            self._registration_allocation(db, registration, company_id)
+            existing = db.execute("SELECT * FROM runs WHERE id=?", (registration["run_id"],)).fetchone()
+            if existing is not None:
+                principal = self._principal(existing)
+                self.validate_principal(principal)
+                return principal
+            db.execute("INSERT INTO identities(id) VALUES (?)", (registration["identity_id"],))
+            db.execute("INSERT INTO memberships(world_id,identity_id,company_id) VALUES (?,?,?)",
+                       (world_id, registration["identity_id"], company_id))
+            db.execute(
+                "INSERT INTO runs(id,world_id,identity_id,company_id,mode,kind,display_name,cursor_secret,created_at) "
+                "VALUES (?,?,?,?,?,'agent',?,?,?)",
+                (registration["run_id"], world_id, registration["identity_id"], company_id,
+                 registration["mode"], "Text agent" if registration["mode"] == "text" else "Image agent",
+                 secrets.token_hex(32), time.time()),
+            )
+            db.execute("UPDATE company_registrations SET company_id=? WHERE world_id=? AND claim_hash=?",
+                       (company_id, world_id, claim_hash))
+            return self._principal(db.execute("SELECT * FROM runs WHERE id=?", (registration["run_id"],)).fetchone())
+
+    def finalize_registration(self, world_id: str, claim_hash: str) -> dict[str, Any]:
+        """Activate the bearer only after durable receipts; caller verifies live owner and worker."""
+        self._ensure_world(world_id)
+        with self._transaction() as db:
+            registration = db.execute(
+                "SELECT * FROM company_registrations WHERE world_id=? AND claim_hash=?", (world_id, claim_hash),
+            ).fetchone()
+            if registration is None:
+                raise ServiceError("not_found", "Registration not found", 404)
+            principal = self.get_principal(registration["run_id"])
+            if principal is None:
+                raise ServiceError("join_not_ready", status=503)
+            self.validate_principal(principal)
+            if registration["ready"]:
+                if not self.credential_matches(principal, claim_hash):
+                    raise ServiceError("unauthorized", status=401)
+                return self._registration(registration)
+            world = db.execute("SELECT epoch,recovery_state FROM worlds WHERE id=?", (world_id,)).fetchone()
+            if world["recovery_state"] != "ready" or world["epoch"] != registration["world_epoch"]:
+                raise ServiceError("world_recovering", status=503)
+            allocation = self._registration_allocation(db, registration, principal.company_id)
+            if allocation["checkpoint_state"] != "checkpointed":
+                raise ServiceError("join_not_ready", status=503)
+            if registration["mode"] == "visual":
+                if registration["worker_public_key"] is None:
+                    raise ServiceError("join_not_ready", status=503)
+                grant = db.execute(
+                    "SELECT status,checkpoint_state FROM action_requests WHERE world_id=? AND identity_id=? "
+                    "AND run_id=? AND request_id=?",
+                    (world_id, principal.identity_id, principal.run_id, registration["worker_request_id"]),
+                ).fetchone()
+                if grant is None or grant["status"] != "completed" or grant["checkpoint_state"] != "checkpointed":
+                    raise ServiceError("join_not_ready", status=503)
+            db.execute("INSERT INTO credentials(token_hash,run_id) VALUES (?,?)", (claim_hash, principal.run_id))
+            db.execute("INSERT INTO agent_join_claims VALUES(?,?,?,?,?)",
+                       (world_id, claim_hash, principal.mode, principal.run_id, time.time()))
+            db.execute("UPDATE company_registrations SET ready=1 WHERE world_id=? AND claim_hash=?",
+                       (world_id, claim_hash))
+            return self._registration(db.execute(
+                "SELECT * FROM company_registrations WHERE world_id=? AND claim_hash=?", (world_id, claim_hash),
+            ).fetchone())
 
     def claim_agent_join(self, world_id: str, world_epoch: str, claim_hash: str, mode: str,
                          principal: Principal, token_hash: str, engine_instance_id: str) -> dict[str, Any]:
@@ -542,51 +801,113 @@ class Store:
             credential = db.execute("SELECT 1 FROM credentials WHERE run_id=?", (principal.run_id,)).fetchone()
             if principal.mode not in ("text", "visual") or not 0 <= principal.company_id <= 14 or credential is None:
                 raise ServiceError("forbidden", "Action admission is unavailable", 403)
-            row = db.execute(
-                "SELECT * FROM action_requests WHERE world_id=? AND identity_id=? AND request_id=?",
-                (principal.world_id, principal.identity_id, request_id),
+            return self._accept_request_in_transaction(db, principal, request_id, canonical)
+
+    @staticmethod
+    def registration_worker_request_id(principal: Principal, participant: dict[str, Any]) -> str:
+        digest = hashlib.sha256(dumps(participant).encode()).hexdigest()[:16]
+        return "registration-worker:" + principal.run_id + ":" + digest
+
+    def accept_registration_setup(
+        self, principal: Principal, request_id: str, payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        """Admit only a pending visual owner's worker grant, never public gameplay."""
+        self._ensure_world(principal.world_id)
+        if (not isinstance(payload, dict) or set(payload) != {"action", "preconditions"}
+                or payload["preconditions"] != {} or not isinstance(payload["action"], dict)
+                or set(payload["action"]) != {"name", "parameters"}
+                or payload["action"]["name"] != "company.participant.authorize"):
+            raise ServiceError("invalid_payload")
+        parameters = payload["action"]["parameters"]
+        if (not isinstance(parameters, dict) or set(parameters) != {"participant", "allowed"}
+                or parameters["allowed"] is not True):
+            raise ServiceError("invalid_payload")
+        participant = parameters["participant"]
+        if (not isinstance(participant, dict) or set(participant) != {"id", "generation", "engine_instance_id"}
+                or type(participant["id"]) is not int or not 0 <= participant["id"] <= 0xFFFFFFFF
+                or type(participant["generation"]) is not int or not 1 <= participant["generation"] <= 0xFFFFFFFFFFFFFFFF
+                or not isinstance(participant["engine_instance_id"], str)
+                or not 1 <= len(participant["engine_instance_id"]) <= 256):
+            raise ServiceError("invalid_payload")
+        if request_id != self.registration_worker_request_id(principal, participant):
+            raise ServiceError("invalid_request_id")
+        canonical = _json(payload)
+        with self._transaction() as db:
+            self.validate_principal(principal)
+            registration = db.execute(
+                "SELECT * FROM company_registrations WHERE world_id=? AND run_id=?",
+                (principal.world_id, principal.run_id),
             ).fetchone()
-            if row is not None:
-                if (row["payload"] != canonical or row["run_id"] != principal.run_id
-                        or row["company_id"] != principal.company_id or row["mode"] != principal.mode):
-                    raise ServiceError("idempotency_conflict", "Request ID already has different content", 409)
-                return self._request(row), False
-            world = db.execute(
-                "SELECT recovery_state,next_request_sequence,retired_through FROM worlds WHERE id=?",
-                (principal.world_id,),
-            ).fetchone()
-            if world["recovery_state"] != "ready":
-                raise ServiceError("world_recovering", "World is recovering", 503)
-            if world["next_request_sequence"] - 1 - world["retired_through"] >= self.max_unretired:
-                raise ServiceError("unretired_capacity", "World ledger capacity reached", 429)
-            world_count = db.execute(
-                "SELECT COUNT(*) FROM action_requests WHERE world_id=? AND status IN ('accepted','queued','uncertain')",
-                (principal.world_id,),
-            ).fetchone()[0]
-            if world_count >= self.max_pending_world:
-                raise ServiceError("world_capacity", "World request capacity reached", 429)
-            company_count = db.execute(
-                "SELECT COUNT(*) FROM action_requests WHERE world_id=? AND company_id=? "
-                "AND status IN ('accepted','queued','uncertain')",
-                (principal.world_id, principal.company_id),
-            ).fetchone()[0]
-            if company_count >= self.max_pending_company:
-                raise ServiceError("company_capacity", "Company request capacity reached", 429)
-            now = time.time()
-            sequence = world["next_request_sequence"]
-            db.execute("UPDATE worlds SET next_request_sequence=? WHERE id=?",
-                       (sequence + 1, principal.world_id))
-            db.execute(
-                "INSERT INTO action_requests(world_id,identity_id,request_id,run_id,company_id,mode,status,payload,request_sequence,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,'accepted',?,?,?,?)",
-                (principal.world_id, principal.identity_id, request_id, principal.run_id,
-                 principal.company_id, principal.mode, canonical, sequence, now, now),
-            )
-            row = db.execute(
-                "SELECT * FROM action_requests WHERE world_id=? AND identity_id=? AND request_id=?",
-                (principal.world_id, principal.identity_id, request_id),
-            ).fetchone()
-            return self._request(row), True
+            if (registration is None or registration["ready"] or registration["mode"] != "visual"
+                    or registration["worker_slot"] is None or principal.mode != "visual"
+                    or registration["worker_public_key"] is None
+                    or registration["company_id"] != principal.company_id
+                    or db.execute("SELECT 1 FROM credentials WHERE run_id=?", (principal.run_id,)).fetchone()):
+                raise ServiceError("forbidden", "Registration setup is unavailable", 403)
+            previous_id = registration["worker_request_id"]
+            if previous_id is not None and previous_id != request_id:
+                previous = db.execute(
+                    "SELECT status,error FROM action_requests WHERE world_id=? AND identity_id=? AND request_id=?",
+                    (principal.world_id, principal.identity_id, previous_id),
+                ).fetchone()
+                previous_error = _decode(previous["error"]) if previous else None
+                if (previous is None or previous["status"] != "rejected"
+                        or not isinstance(previous_error, dict)
+                        or previous_error.get("code") not in ("invalid_targets", "stale_target", "invalid_parameters")):
+                    raise ServiceError("join_not_ready", status=503)
+            record, accepted = self._accept_request_in_transaction(db, principal, request_id, canonical)
+            db.execute("UPDATE company_registrations SET worker_request_id=? WHERE world_id=? AND run_id=?",
+                       (request_id, principal.world_id, principal.run_id))
+            return record, accepted
+
+    def _accept_request_in_transaction(
+        self, db: sqlite3.Connection, principal: Principal, request_id: str, canonical: str,
+    ) -> tuple[dict[str, Any], bool]:
+        row = db.execute(
+            "SELECT * FROM action_requests WHERE world_id=? AND identity_id=? AND request_id=?",
+            (principal.world_id, principal.identity_id, request_id),
+        ).fetchone()
+        if row is not None:
+            if (row["payload"] != canonical or row["run_id"] != principal.run_id
+                    or row["company_id"] != principal.company_id or row["mode"] != principal.mode):
+                raise ServiceError("idempotency_conflict", "Request ID already has different content", 409)
+            return self._request(row), False
+        world = db.execute(
+            "SELECT recovery_state,next_request_sequence,retired_through FROM worlds WHERE id=?",
+            (principal.world_id,),
+        ).fetchone()
+        if world["recovery_state"] != "ready":
+            raise ServiceError("world_recovering", "World is recovering", 503)
+        if world["next_request_sequence"] - 1 - world["retired_through"] >= self.max_unretired:
+            raise ServiceError("unretired_capacity", "World ledger capacity reached", 429)
+        world_count = db.execute(
+            "SELECT COUNT(*) FROM action_requests WHERE world_id=? AND status IN ('accepted','queued','uncertain')",
+            (principal.world_id,),
+        ).fetchone()[0]
+        if world_count >= self.max_pending_world:
+            raise ServiceError("world_capacity", "World request capacity reached", 429)
+        company_count = db.execute(
+            "SELECT COUNT(*) FROM action_requests WHERE world_id=? AND company_id=? "
+            "AND status IN ('accepted','queued','uncertain')",
+            (principal.world_id, principal.company_id),
+        ).fetchone()[0]
+        if company_count >= self.max_pending_company:
+            raise ServiceError("company_capacity", "Company request capacity reached", 429)
+        now = time.time()
+        sequence = world["next_request_sequence"]
+        db.execute("UPDATE worlds SET next_request_sequence=? WHERE id=?",
+                   (sequence + 1, principal.world_id))
+        db.execute(
+            "INSERT INTO action_requests(world_id,identity_id,request_id,run_id,company_id,mode,status,payload,request_sequence,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,'accepted',?,?,?,?)",
+            (principal.world_id, principal.identity_id, request_id, principal.run_id,
+             principal.company_id, principal.mode, canonical, sequence, now, now),
+        )
+        row = db.execute(
+            "SELECT * FROM action_requests WHERE world_id=? AND identity_id=? AND request_id=?",
+            (principal.world_id, principal.identity_id, request_id),
+        ).fetchone()
+        return self._request(row), True
 
     def reserve_internal(self, world_id: str, request_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         with self._transaction() as db:
@@ -595,17 +916,26 @@ class Store:
     def reserve_internal_in_transaction(
         self, db: sqlite3.Connection, world_id: str, request_id: str, payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """Reserve a backend chat mutation in the same ordered action ledger."""
+        """Reserve a finite backend mutation in the same ordered action ledger."""
         self._ensure_world(world_id)
         if db is not self.connection or not db.in_transaction:
             raise ValueError("An active Store transaction is required")
         if not isinstance(request_id, str) or not request_id:
             raise ServiceError("invalid_request_id", "Request ID must be a nonempty string")
-        if not isinstance(payload, dict) or payload.get("rpc_type") != "chat.publish":
+        if not isinstance(payload, dict) or payload.get("rpc_type") not in ("chat.publish", "company.register"):
             raise ServiceError("invalid_payload", "Invalid internal request payload")
+        if payload["rpc_type"] == "company.register":
+            owner = payload.get("owner")
+            if (set(payload) != {"rpc_type", "owner"} or not isinstance(owner, dict)
+                    or set(owner) != {"identity_id", "run_id", "mode"}
+                    or not isinstance(owner["identity_id"], str) or not owner["identity_id"]
+                    or not isinstance(owner["run_id"], str)
+                    or re.fullmatch(r"registration-[0-9a-f]{32}", owner["run_id"]) is None
+                    or owner["identity_id"] != "agent:" + owner["run_id"]
+                    or owner["mode"] not in ("text", "visual")):
+                raise ServiceError("invalid_payload", "Invalid registration owner")
         canonical = _json(payload)
-        identity_id = "__backend_chat__"
-        run_id = "__backend_chat_run__:" + world_id
+        identity_id, run_id, display_name = self._internal_identity(world_id, payload["rpc_type"])
         existing = db.execute(
             "SELECT * FROM action_requests WHERE world_id=? AND identity_id=? AND request_id=?",
             (world_id, identity_id, request_id),
@@ -642,8 +972,8 @@ class Store:
         )
         db.execute(
             "INSERT OR IGNORE INTO runs(id,world_id,identity_id,company_id,mode,kind,display_name,cursor_secret,created_at) "
-            "VALUES (?,?,?,255,'internal','agent','Backend chat',?,?)",
-            (run_id, world_id, identity_id, secrets.token_hex(32), time.time()),
+            "VALUES (?,?,?,255,'internal','agent',?,?,?)",
+            (run_id, world_id, identity_id, display_name, secrets.token_hex(32), time.time()),
         )
         sequence = world["next_request_sequence"]
         db.execute("UPDATE worlds SET next_request_sequence=? WHERE id=?", (sequence + 1, world_id))
@@ -659,12 +989,21 @@ class Store:
         ).fetchone()
         return self._request(row)
 
-    def get_internal(self, world_id: str, request_id: str) -> dict[str, Any] | None:
+    @staticmethod
+    def _internal_identity(world_id: str, rpc_type: str) -> tuple[str, str, str]:
+        if rpc_type == "chat.publish":
+            return "__backend_chat__", "__backend_chat_run__:" + world_id, "Backend chat"
+        if rpc_type == "company.register":
+            return "__backend_registration__", "__backend_registration_run__:" + world_id, "Backend registration"
+        raise ServiceError("invalid_payload", "Invalid internal request type")
+
+    def get_internal(self, world_id: str, request_id: str, rpc_type: str = "chat.publish") -> dict[str, Any] | None:
         self._ensure_world(world_id)
+        identity_id = self._internal_identity(world_id, rpc_type)[0]
         with self.lock:
             row = self.connection.execute(
-                "SELECT * FROM action_requests WHERE world_id=? AND identity_id='__backend_chat__' AND request_id=?",
-                (world_id, request_id),
+                "SELECT * FROM action_requests WHERE world_id=? AND identity_id=? AND request_id=?",
+                (world_id, identity_id, request_id),
             ).fetchone()
         return self._request(row) if row else None
 

@@ -60,7 +60,7 @@ def _canonical_path(value: str, *, directory: bool = False) -> str:
     return str(path)
 
 
-def _renderer_config(path: str, store, world_id: str) -> dict:
+def _renderer_configuration(path: str, store, world_id: str) -> tuple[dict, dict]:
     """Read a private operator map; no public request can select these paths."""
     _canonical_path(path)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -77,28 +77,49 @@ def _renderer_config(path: str, store, world_id: str) -> dict:
         value = loads(raw.decode("utf-8"))
     except (UnicodeError, ValueError, RecursionError):
         raise ValueError("Invalid renderer JSON config") from None
-    if (not isinstance(value, dict) or set(value) != {"version", "world_id", "runs"} or
-        type(value["version"]) is not int or value["version"] != 1 or value["world_id"] != world_id or
-        not isinstance(value["runs"], dict) or not 1 <= len(value["runs"]) <= 16):
+    if not isinstance(value, dict) or type(value.get("version")) is not int:
         raise ValueError("Invalid renderer config schema or world")
-    workers = {}
+    version = value["version"]
+    if (value.get("world_id") != world_id or
+            (version == 1 and (set(value) != {"version", "world_id", "runs"}
+                               or not isinstance(value["runs"], dict)
+                               or not 1 <= len(value["runs"]) <= 16)) or
+            (version == 2 and (set(value) not in ({"version", "world_id", "slots"},
+                                                {"version", "world_id", "slots", "runs"})
+                               or not isinstance(value["slots"], dict)
+                               or not isinstance(value.get("runs", {}), dict)
+                               or len(value["slots"]) + len(value.get("runs", {})) > 15)) or
+            version not in (1, 2)):
+        raise ValueError("Invalid renderer config schema or world")
+    maps = {"runs": {}, "slots": {}}
     sockets, directories = set(), set()
-    for run_id, settings in value["runs"].items():
-        if not isinstance(run_id, str) or not run_id or len(run_id) > 128:
-            raise ValueError("Invalid renderer run ID")
-        principal = store.get_principal(run_id)
-        if principal is None or principal.world_id != world_id or principal.mode not in ("text", "visual"):
-            raise ValueError("Renderer run must be active in this world and text or visual")
-        if not isinstance(settings, dict) or set(settings) != {"socket", "artifacts"}:
-            raise ValueError("Invalid renderer run settings")
-        socket_path = _canonical_path(settings["socket"])
-        artifacts = _canonical_path(settings["artifacts"], directory=True)
-        if socket_path in sockets or artifacts in directories:
-            raise ValueError("Renderer sockets and artifact directories must be unique")
-        sockets.add(socket_path)
-        directories.add(artifacts)
-        workers[run_id] = {"socket": socket_path, "artifacts": artifacts}
-    return workers
+    for field in ("runs", "slots"):
+        for identifier, settings in value.get(field, {}).items():
+            if (not isinstance(identifier, str) or not identifier or len(identifier) > 128
+                    or (field == "slots" and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", identifier))):
+                raise ValueError("Invalid renderer run or slot ID")
+            if field == "runs":
+                principal = store.get_principal(identifier)
+                if principal is None or principal.world_id != world_id or principal.mode not in ("text", "visual"):
+                    raise ValueError("Renderer run must be active in this world and text or visual")
+            if not isinstance(settings, dict) or set(settings) != {"socket", "artifacts"}:
+                raise ValueError("Invalid renderer run settings")
+            socket_path = _canonical_path(settings["socket"])
+            artifacts = _canonical_path(settings["artifacts"], directory=True)
+            if socket_path in sockets or artifacts in directories:
+                raise ValueError("Renderer sockets and artifact directories must be unique")
+            sockets.add(socket_path)
+            directories.add(artifacts)
+            maps[field][identifier] = {"socket": socket_path, "artifacts": artifacts}
+    return maps["runs"], maps["slots"]
+
+
+def _renderer_config(path: str, store, world_id: str) -> dict:
+    """Compatibility reader for the original operator run map."""
+    entries, slots = _renderer_configuration(path, store, world_id)
+    if slots:
+        raise ValueError("Expected a version-1 renderer run map")
+    return entries
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -111,8 +132,10 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--renderer-socket", help="separate private renderer IPC socket")
     serve.add_argument("--renderer-run", help="run ID served by the renderer")
     serve.add_argument("--renderer-artifacts", help="trusted renderer PNG artifact directory")
-    serve.add_argument("--renderer-config", help="private JSON map of renderer runs")
+    serve.add_argument("--renderer-config", help="private JSON map of renderer runs (v1) or spectator slots (v2)")
     serve.add_argument("--agent-join-pool", help="opt-in private map of preprovisioned companies available to public agent joins")
+    serve.add_argument("--dynamic-agents", action="store_true",
+                       help="create a new owned company when an agent registers")
     serve.add_argument("--transport", choices=("asgi", "http"), default="asgi",
                        help="ASGI production adapter (default) or local-development HTTP")
     serve.add_argument("--max-pending-company", type=_bounded_decimal("company limit", 1, 128), default=64)
@@ -217,15 +240,21 @@ def main(argv: list[str] | None = None) -> int:
             store.enforce_single_world(args.world)
             if args.renderer_config or args.renderer_socket:
                 from .renderer import RendererGateway
+                slots = {}
                 if args.renderer_config:
                     try:
-                        entries = _renderer_config(args.renderer_config, store, args.world)
+                        entries, slot_entries = _renderer_configuration(args.renderer_config, store, args.world)
                     except (OSError, ValueError) as exc:
                         parser.error(f"Invalid renderer config: {exc}")
                     workers = {
                         run_id: {"engine": UnixEngine(entry["socket"], timeout=15),
                                  "artifacts": entry["artifacts"]}
                         for run_id, entry in entries.items()
+                    }
+                    slots = {
+                        slot_id: {"engine": UnixEngine(entry["socket"], timeout=15),
+                                  "artifacts": entry["artifacts"]}
+                        for slot_id, entry in slot_entries.items()
                     }
                 else:
                     workers = {args.renderer_run: {
@@ -237,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
                     world_id=args.world,
                     world_epoch=store.world_epoch(args.world),
                     capture_interval=args.capture_interval if args.capture_interval is not None else 1.0,
+                    slots=slots,
                 )
             admission = None
             if args.agent_join_pool:
@@ -245,6 +275,9 @@ def main(argv: list[str] | None = None) -> int:
                     admission = AgentAdmission.from_file(args.agent_join_pool, store, args.world, renderer)
                 except (OSError, ValueError, ServiceError) as exc:
                     parser.error(f"Invalid agent join pool: {exc}")
+            if args.dynamic_agents:
+                from .admission import DynamicAgentAdmission
+                admission = DynamicAgentAdmission(store, args.world, renderer, legacy=admission)
             service = Service(store, UnixEngine(args.engine_socket), world_id=args.world,
                               renderer=renderer, admission=admission)
             try:

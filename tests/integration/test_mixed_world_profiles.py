@@ -169,6 +169,207 @@ class OvernightProfileTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_public_profile_provisions_only_world_and_spectator_capacity(self):
+        args = self.arguments("public")
+        self.assertEqual(args.map_size, 512)
+        self.assertTrue(args.agent_joins)
+        self.assertEqual(args.roles, {})
+        self.assertEqual(args.workers, {})
+        self.assertEqual(args.capture_slots, {"capture-0": "rp0", "capture-1": "rp1"})
+        manifest = self.provision(args)
+        self.assertEqual(manifest["runs"], {})
+        self.assertEqual(list((self.state / "credentials").iterdir()), [])
+        self.assertIsNone(mixed_world.agent_join_pool(self.state, args, manifest))
+        store = Store(self.state / "world.sqlite3", world_id=args.world)
+        try:
+            self.assertEqual(store.world_epoch(args.world), manifest["world_epoch"])
+            for table in ("runs", "memberships", "credentials"):
+                self.assertEqual(store.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+        finally:
+            store.close()
+        self.assertEqual(self.arguments("public", "--capture-workers", "0").capture_slots, {})
+        self.assertEqual(len(self.arguments("public", "--capture-workers", "15").capture_slots), 15)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.arguments("luna", "--capture-workers", "3")
+
+    def test_public_start_never_creates_or_opens_company_for_renderer(self):
+        args = self.arguments("public")
+        manifest = self.provision(args)
+        stack = mixed_world.Stack(self.state, args, manifest)
+        commands, requests = {}, []
+        checkpoint_reads = 0
+
+        def spawn(name, command, **kwargs):
+            commands[name] = command
+            child = mock.Mock()
+            child.poll.return_value = None
+            child.stdin = io.BytesIO()
+            stack.children[name] = child
+            return child
+
+        def rpc(kind, **fields):
+            nonlocal checkpoint_reads
+            requests.append(kind)
+            result = {}
+            if kind == "hello":
+                result = {"role": "world"}
+            elif kind == "checkpoint.status":
+                checkpoint_reads += 1
+                result = {"status": "completed", "load_verified": True, "recovery_required": False,
+                          "checkpoint_id": "after" if checkpoint_reads >= 4 else "before"}
+            elif kind == "roster":
+                result = [{"public_key": str(i + 1) * 64, "company_id": 255} for i in range(2)]
+            return {"status": "completed", "engine_instance_id": "native", "result": result}
+
+        def renderer_engine(socket, **kwargs):
+            number = 1 if Path(socket).stem == "rp0" else 2
+            engine = mock.Mock()
+            engine.call.return_value = {"world_id": args.world, "world_epoch": manifest["world_epoch"],
+                                       "result": {"role": "renderer", "native_public_key": str(number) * 64}}
+            return engine
+
+        with (mock.patch.object(stack, "spawn", side_effect=spawn),
+              mock.patch.object(stack, "rpc", side_effect=rpc),
+              mock.patch("tools.mixed_world.UnixEngine", side_effect=renderer_engine),
+              contextlib.redirect_stdout(io.StringIO())):
+            stack.start()
+        self.assertNotIn("company.ensure", requests)
+        self.assertNotIn("company.access", requests)
+        self.assertIn("--dynamic-agents", commands["backend"])
+        self.assertNotIn("--agent-join-pool", commands["backend"])
+        for name in ("rp0", "rp1"):
+            self.assertIn(f"127.0.0.1:{args.native_port}#255", commands[name])
+        config = json.loads((self.state / "renderer-config.json").read_text())
+        self.assertEqual(config["version"], 2)
+        self.assertEqual(set(config["slots"]), {"capture-0", "capture-1"})
+        self.assertEqual(manifest["renderer_keys"], {})
+        self.assertEqual(set(manifest["capture_slot_keys"]), {"capture-0", "capture-1"})
+
+    def ready_legacy(self):
+        args = self.arguments("luna", "--agent-joins")
+        manifest = self.provision(args)
+        manifest["ready"] = True
+        manifest["renderer_keys"] = {role: str(i + 1) * 64 for i, role in enumerate(args.workers)}
+        mixed_world.publish_manifest(self.state, manifest)
+        save = self.state / "engine-state" / "world.sav"
+        mixed_world.write_new(save, "checkpoint fixture\n")
+        mixed_world.write_new(self.state / "engine-state" / "ledger.json", json.dumps({"journal": {
+            "world_id": args.world, "world_epoch": manifest["world_epoch"],
+            "checkpoint": {"save_path": str(save), "checkpoint_id": "checkpoint-1"}}}))
+        legacy, _ = mixed_world.renderer_configuration(self.state, args, manifest)
+        mixed_world.write_new(self.state / "renderer-config.json", json.dumps(legacy))
+        return args, manifest, save, legacy
+
+    def test_legacy_dynamic_extension_preserves_bindings_and_requires_recorded_mode(self):
+        old, manifest, save, legacy = self.ready_legacy()
+        preserved = {path: path.read_bytes() for path in self.state.rglob("*")
+                     if path.is_file() and (path.suffix in (".token", ".cfg"))}
+        bindings = json.loads(json.dumps({key: manifest[key] for key in ("runs", "renderer_keys")}))
+        args = self.arguments("luna", "--dynamic-agents")
+        upgraded, selected = mixed_world.load_existing(self.state, args)
+        self.assertEqual(selected, save)
+        self.assertEqual(upgraded, manifest)
+        self.assertEqual({path: path.read_bytes() for path in preserved}, preserved)
+        stack = mixed_world.Stack(self.state, args, upgraded)
+        commands, requests = {}, []
+        checkpoint_reads = 0
+        keys = {worker: str(i + 1) * 64 for i, worker in enumerate(
+            (*args.workers.values(), *args.capture_slots.values()))}
+
+        def spawn(name, command, **kwargs):
+            commands[name] = command
+            child = mock.Mock()
+            child.poll.return_value = None
+            child.stdin = io.BytesIO()
+            stack.children[name] = child
+            return child
+
+        def rpc(kind, **fields):
+            nonlocal checkpoint_reads
+            requests.append((kind, fields))
+            result = {}
+            if kind == "hello":
+                result = {"role": "world"}
+            elif kind == "checkpoint.status":
+                checkpoint_reads += 1
+                result = {"status": "completed", "load_verified": True, "recovery_required": False,
+                          "checkpoint_id": "after" if checkpoint_reads >= 4 else "before"}
+            elif kind == "roster":
+                companies = {worker: args.roles[role]["company_id"] for role, worker in args.workers.items()}
+                result = [{"public_key": key, "company_id": companies.get(worker, 255)}
+                          for worker, key in keys.items()]
+            return {"status": "completed", "engine_instance_id": "native", "result": result}
+
+        def renderer_engine(socket, **kwargs):
+            engine = mock.Mock()
+            engine.call.return_value = {"world_id": args.world, "world_epoch": manifest["world_epoch"],
+                "result": {"role": "renderer", "native_public_key": keys[Path(socket).stem]}}
+            return engine
+
+        with (mock.patch.object(stack, "spawn", side_effect=spawn),
+              mock.patch.object(stack, "rpc", side_effect=rpc),
+              mock.patch("tools.mixed_world.UnixEngine", side_effect=renderer_engine),
+              contextlib.redirect_stdout(io.StringIO())):
+            stack.start(save)
+        current = json.loads((self.state / "renderer-config.json").read_text())
+        self.assertEqual(current["runs"], legacy["runs"])
+        self.assertEqual(set(current["slots"]), set(args.capture_slots))
+        self.assertEqual({key: upgraded[key] for key in bindings}, bindings)
+        self.assertEqual({path: path.read_bytes() for path in preserved}, preserved)
+        self.assertTrue(upgraded["dynamic_agents"])
+        self.assertIn("--dynamic-agents", commands["backend"])
+        self.assertIn("--agent-join-pool", commands["backend"])
+        for worker in args.capture_slots.values():
+            self.assertIn(f"127.0.0.1:{args.native_port}#255", commands[worker])
+        self.assertTrue(all(fields["create"] is False for kind, fields in requests if kind == "company.ensure"))
+        self.assertEqual(mixed_world.load_existing(self.state, args)[0], upgraded)
+        for changed in (old, self.arguments("luna", "--dynamic-agents", "--capture-workers", "1")):
+            with self.assertRaises(mixed_world.StartupError):
+                mixed_world.load_existing(self.state, changed)
+        renderer_path = self.state / "renderer-config.json"
+        saved_map = renderer_path.read_bytes()
+        renderer_path.unlink()
+        with self.assertRaises(mixed_world.StartupError):
+            mixed_world.load_existing(self.state, args)
+        mixed_world.write_new(renderer_path, saved_map.decode())
+        changed = json.loads(saved_map)
+        changed["slots"]["capture-0"]["socket"] = str(self.state / "ipc" / "changed.sock")
+        mixed_world.publish_private_json(renderer_path, changed)
+        with self.assertRaises(mixed_world.StartupError):
+            mixed_world.load_existing(self.state, args)
+
+    def test_first_extension_retries_v2_config_without_replacing_private_keys(self):
+        old, manifest, _, _ = self.ready_legacy()
+        args = self.arguments("luna", "--dynamic-agents")
+        mixed_world.load_existing(self.state, args)
+        retained = {self.state / worker / "config/openttd/secrets.cfg":
+                    (self.state / worker / "config/openttd/secrets.cfg").read_bytes()
+                    for worker in args.capture_slots.values()}
+        _, config = mixed_world.renderer_configuration(self.state, args, manifest)
+        mixed_world.publish_private_json(self.state / "renderer-config.json", config)
+        self.assertEqual(mixed_world.load_existing(self.state, args)[0], manifest)
+        self.assertEqual({path: path.read_bytes() for path in retained}, retained)
+        with self.assertRaises(mixed_world.StartupError):
+            mixed_world.load_existing(self.state, old)
+        renderer_path = self.state / "renderer-config.json"
+        retained_map = self.state / "retained-renderer-config.json"
+        renderer_path.rename(retained_map)
+        with self.assertRaises(mixed_world.StartupError):
+            mixed_world.load_existing(self.state, args)
+        self.assertFalse(renderer_path.exists())
+        retained_map.rename(renderer_path)
+        directory = self.state / "rp0"
+        held = self.state / "retained-rp0"
+        directory.rename(held)
+        with self.assertRaises(mixed_world.StartupError):
+            mixed_world.load_existing(self.state, args)
+        self.assertFalse(directory.exists())
+        held.rename(directory)
+        next(iter(retained)).unlink()
+        with self.assertRaises(mixed_world.StartupError):
+            mixed_world.load_existing(self.state, args)
+        self.assertFalse(next(iter(retained)).exists())
+
 
 if __name__ == "__main__":
     unittest.main()

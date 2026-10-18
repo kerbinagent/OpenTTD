@@ -94,6 +94,10 @@ class CheckpointPolicy:
             self._quiescing = True
         return self._quiescing
 
+    def request(self):
+        """Prompt a durable save after a setup mutation has finished executing."""
+        self._quiescing = True
+
     def should_create(self, queued_count):
         """The broker must first drain already queued bridge mutations."""
         if type(queued_count) is not int or queued_count < 0:

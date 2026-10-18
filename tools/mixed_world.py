@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one private local mixed, Luna, or overnight world; preserve it on exit.
+"""Run a private mixed, experiment, or public-registration world; preserve it on exit.
 
 This launcher owns process lifetimes and operator company provisioning only.
 The backend owns request sequencing, checkpoint scheduling and recovery.
@@ -39,7 +39,9 @@ KEY = re.compile(r"[0-9a-fA-F]{64}\Z")
 
 
 def profile_bindings(profile):
-    """Fixed role layouts; each invocation receives its own maps."""
+    """Fixed experiments or a public world with bounded spectator capacity."""
+    if profile == "public":
+        return {}, {}
     if profile == "mixed":
         return {
             "human": {"identity_id": "local-human", "company_id": 0, "mode": "visual", "kind": "human", "display_name": "Human viewer"},
@@ -104,7 +106,7 @@ def write_new(path: Path, text: str):
 
 def agent_join_pool(state: Path, args, manifest):
     """Publish only the operator-selected agent runs; never rotate their tokens."""
-    if not args.agent_joins:
+    if not args.agent_joins or args.profile == "public":
         return None
     value = {"version": 1, "world_id": args.world, "world_epoch": manifest["world_epoch"],
              "runs": {manifest["runs"][role]["run_id"]: {
@@ -124,15 +126,19 @@ def agent_join_pool(state: Path, args, manifest):
     return path
 
 
-def publish_manifest(state: Path, manifest):
-    temporary = state / "manifest.json.new"
-    write_new(temporary, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, state / "manifest.json")
-    descriptor = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+def publish_private_json(path: Path, value):
+    temporary = path.with_name(path.name + ".new")
+    write_new(temporary, json.dumps(value, indent=2, sort_keys=True) + "\n")
+    os.replace(temporary, path)
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def publish_manifest(state: Path, manifest):
+    publish_private_json(state / "manifest.json", manifest)
 
 
 def process_paths(state: Path, name: str):
@@ -154,7 +160,7 @@ def prepare_process(state: Path, name: str, baseset: Path, size: int, *, label="
               + "[gui]\npause_on_newgame = false\nautosave = off\n"
               "[misc]\nlanguage = english.lng\nsavegame_format = lzma:2\n"
               f"[game_creation]\nmap_x = {int(math.log2(size))}\nmap_y = {int(math.log2(size))}\n"
-              + ("starting_year = 1950\nlandscape = temperate\n" if profile in ("luna", "overnight") and not renderer else ""))
+              + ("starting_year = 1950\nlandscape = temperate\n" if profile in ("luna", "overnight", "public") and not renderer else ""))
     write_new(config / "openttd" / "private.cfg",
               "[version]\nini_version = 8\n[network]\n"
               f"client_name = {label}\nserver_name = Local mixed world\n")
@@ -165,6 +171,24 @@ def prepare_process(state: Path, name: str, baseset: Path, size: int, *, label="
         private_directory(directory / "images", create=True)
 
 
+def validate_process(state: Path, name: str, args, *, renderer=False):
+    """Validate retained process state without replacing a native identity."""
+    directory, config, data = process_paths(state, name)
+    for path in (directory, config, data, config / "openttd", data / "openttd"):
+        private_directory(path)
+    for file in ("openttd.cfg", "private.cfg"):
+        private_file(config / "openttd" / file)
+    link = data / "openttd" / "baseset"
+    if not link.is_symlink() or link.resolve() != args.baseset:
+        raise StartupError("Existing process base-set binding differs from --baseset")
+    if renderer:
+        settings = configparser.ConfigParser(interpolation=None)
+        settings.read_string(private_file(config / "openttd" / "secrets.cfg").decode("utf-8"))
+        if not KEY.fullmatch(settings.get("network", "client_secret_key", fallback="")):
+            raise StartupError("Existing renderer secret key is invalid")
+        private_directory(directory / "images")
+
+
 def provision(state: Path, args):
     for name in ("ipc", "logs", "credentials", "engine-state"):
         private_directory(state / name, create=True)
@@ -172,13 +196,18 @@ def provision(state: Path, args):
     for role, worker in args.workers.items():
         prepare_process(state, worker, args.baseset, args.map_size,
                         label=f"mixed-{worker}", renderer=True, profile=args.profile)
+    for worker in args.capture_slots.values():
+        prepare_process(state, worker, args.baseset, args.map_size,
+                        label=f"capture-{worker}", renderer=True, profile=args.profile)
     manifest = {"version": 1, "profile": args.profile, "world_id": args.world, "world_epoch": uuid.uuid4().hex,
                 "ready": False, "runs": {}, "renderer_keys": {}}
-    if args.profile in ("luna", "overnight"):
+    if args.profile in ("luna", "overnight", "public"):
         manifest["generation"] = {"map_size": args.map_size, "seed": args.seed,
                                   "starting_year": 1950, "landscape": "temperate"}
     store = Store(state / "world.sqlite3", world_id=args.world)
     try:
+        if args.profile == "public":
+            store.ensure_world(args.world, manifest["world_epoch"])
         for role, binding in args.roles.items():
             if args.agent_joins and binding["kind"] == "agent":
                 binding = {**binding, "display_name": "Text agent" if binding["mode"] == "text" else "Image agent"}
@@ -192,6 +221,23 @@ def provision(state: Path, args):
     return manifest
 
 
+def renderer_configuration(state: Path, args, manifest):
+    legacy = {"version": 1, "world_id": args.world, "runs": {
+        manifest["runs"][role]["run_id"]: {
+            "socket": str(state / "ipc" / f"{worker}.sock"),
+            "artifacts": str(state / worker / "images")}
+        for role, worker in args.workers.items()}}
+    if not args.dynamic_agents:
+        return legacy, legacy
+    current = {"version": 2, "world_id": args.world, "slots": {
+        slot: {"socket": str(state / "ipc" / f"{worker}.sock"),
+               "artifacts": str(state / worker / "images")}
+        for slot, worker in args.capture_slots.items()}}
+    if args.workers:
+        current["runs"] = legacy["runs"]
+    return legacy, current
+
+
 def load_existing(state: Path, args):
     try:
         manifest = json.loads(private_file(state / "manifest.json"))
@@ -203,25 +249,25 @@ def load_existing(state: Path, args):
                 or manifest.get("ready") is not True or set(manifest.get("runs", {})) != set(args.roles)
                 or set(manifest.get("renderer_keys", {})) != set(args.workers)):
             raise StartupError("Existing launcher manifest is incomplete or belongs to another world")
+        committed_dynamic = manifest.get("dynamic_agents", False)
+        if type(committed_dynamic) is not bool or (committed_dynamic and not args.dynamic_agents):
+            raise StartupError("Existing world requires its recorded --dynamic-agents mode")
+        recorded_slots = manifest.get("capture_slot_keys", {})
+        if (not isinstance(recorded_slots, dict)
+                or (committed_dynamic and set(recorded_slots) != set(args.capture_slots))
+                or (not committed_dynamic and recorded_slots)):
+            raise StartupError("Existing capture slot configuration differs from the recorded world")
+        if any(not isinstance(key, str) or not KEY.fullmatch(key) for key in recorded_slots.values()):
+            raise StartupError("Existing capture slot public key is invalid")
+        all_keys = [*manifest["renderer_keys"].values(), *recorded_slots.values()]
+        if len({key.lower() for key in all_keys}) != len(all_keys):
+            raise StartupError("Renderer native identities must be distinct")
         check_private_file((state / "world.sqlite3").lstat(), state / "world.sqlite3", 1024 * 1024 * 1024)
         for name in ("ipc", "logs", "credentials", "engine-state"):
             private_directory(state / name)
-        for name in ("engine", *args.workers.values()):
-            directory, config, data = process_paths(state, name)
-            for path in (directory, config, data, config / "openttd", data / "openttd"):
-                private_directory(path)
-            for file in ("openttd.cfg", "private.cfg"):
-                private_file(config / "openttd" / file)
-            link = data / "openttd" / "baseset"
-            if not link.is_symlink() or link.resolve() != args.baseset:
-                raise StartupError("Existing process base-set binding differs from --baseset")
+        validate_process(state, "engine", args)
         for role, worker in args.workers.items():
-            _, config, _ = process_paths(state, worker)
-            settings = configparser.ConfigParser(interpolation=None)
-            settings.read_string(private_file(config / "openttd" / "secrets.cfg").decode("utf-8"))
-            if not KEY.fullmatch(settings.get("network", "client_secret_key", fallback="")):
-                raise StartupError("Existing renderer secret key is invalid")
-            private_directory(state / worker / "images")
+            validate_process(state, worker, args, renderer=True)
             if not isinstance(manifest["renderer_keys"][role], str) or not KEY.fullmatch(manifest["renderer_keys"][role]):
                 raise StartupError("Existing renderer public key is invalid")
         # The launcher selects the recorded save; native code validates its sidecar/checksum.
@@ -246,6 +292,29 @@ def load_existing(state: Path, args):
                     raise StartupError("Existing credential/run binding differs from the launcher manifest")
         finally:
             store.close()
+        legacy_config, expected_config = renderer_configuration(state, args, manifest)
+        renderer_path = state / "renderer-config.json"
+        extension_started = committed_dynamic
+        if args.dynamic_agents and not renderer_path.exists():
+            raise StartupError("Existing world requires its retained renderer configuration before extension or restart")
+        if committed_dynamic:
+            if json.loads(private_file(renderer_path)) != expected_config:
+                raise StartupError("Existing renderer map differs from the recorded run and slot bindings")
+        elif args.dynamic_agents and renderer_path.exists():
+            current_config = json.loads(private_file(renderer_path))
+            if current_config not in (legacy_config, expected_config):
+                raise StartupError("Only the exact existing renderer map may be extended")
+            extension_started = current_config == expected_config
+        elif renderer_path.exists() and json.loads(private_file(renderer_path)) != legacy_config:
+            raise StartupError("Existing renderer map requires its explicit dynamic mode and slot configuration")
+        # Only an explicit first extension may create new process directories.
+        # Partial/unsafe retained directories fail closed; no key is regenerated.
+        for worker in args.capture_slots.values():
+            directory = state / worker
+            if not directory.exists() and not extension_started:
+                prepare_process(state, worker, args.baseset, args.map_size,
+                                label=f"capture-{worker}", renderer=True, profile=args.profile)
+            validate_process(state, worker, args, renderer=True)
         return manifest, save
     except StartupError:
         raise
@@ -258,6 +327,7 @@ class Stack:
         self.state, self.args, self.manifest = state, args, manifest
         self.roles = {role: dict(binding) for role, binding in args.roles.items()}
         self.workers = dict(args.workers)
+        self.capture_slots = dict(args.capture_slots)
         self.children = {}
         self.instance = None
         self.rpc_client = UnixEngine(state / "ipc" / "engine.sock", timeout=2)
@@ -353,15 +423,16 @@ class Stack:
         engine = self.children["engine"]
         engine.stdin.write(b"unpause\n")
         engine.stdin.flush()
-        config = {"version": 1, "world_id": self.args.world, "runs": {
-            self.manifest["runs"][role]["run_id"]: {
-                "socket": str(self.state / "ipc" / f"{worker}.sock"),
-                "artifacts": str(self.state / worker / "images")}
-            for role, worker in self.workers.items()}}
+        dynamic = self.args.dynamic_agents
+        legacy_config, config = renderer_configuration(self.state, self.args, self.manifest)
         renderer_config = self.state / "renderer-config.json"
         if renderer_config.exists():
-            if json.loads(private_file(renderer_config)) != config:
-                raise StartupError("Existing renderer map does not match the stable run bindings")
+            current = json.loads(private_file(renderer_config))
+            if current != config:
+                if dynamic and not self.manifest.get("dynamic_agents", False) and current == legacy_config:
+                    publish_private_json(renderer_config, config)
+                else:
+                    raise StartupError("Existing renderer map does not match the recorded run and slot bindings")
         else:
             write_new(renderer_config, json.dumps(config, indent=2) + "\n")
         join_pool = agent_join_pool(self.state, self.args, self.manifest)
@@ -371,6 +442,8 @@ class Stack:
                                "--host", "127.0.0.1", "--port", str(self.args.http_port)]
         if join_pool is not None:
             backend_command += ["--agent-join-pool", str(join_pool)]
+        if dynamic:
+            backend_command += ["--dynamic-agents"]
         self.spawn("backend", backend_command, environment=self.environment("engine"))
         self.wait("backend-owned recovery", lambda: not self.rpc("checkpoint.status").get("result", {}).get("recovery_required", True))
         for company in sorted(binding["company_id"] for binding in self.roles.values()):
@@ -384,15 +457,17 @@ class Stack:
         for company, policy in initial_policies.items():
             self.wait(f"company {company + 1} initial join policy",
                       lambda company=company, policy=policy: self.rpc("company.access", company_id=company, **policy).get("status") == "completed")
-        for role, worker in self.workers.items():
-            company = self.roles[role]["company_id"]
+        entries = [(False, role, worker) for role, worker in self.workers.items()]
+        entries += [(True, slot, worker) for slot, worker in self.capture_slots.items()]
+        for pooled, role, worker in entries:
+            company = None if pooled else self.roles[role]["company_id"]
             self.spawn(worker, [str(self.args.binary), "-v", "framebuffer", "-s", "null", "-m", "null", "-r", "1280x720",
-                                "-n", f"127.0.0.1:{self.args.native_port}#{company + 1}",
+                                "-n", f"127.0.0.1:{self.args.native_port}#{255 if pooled else company + 1}",
                                 "-c", str(process_paths(self.state, worker)[1] / "openttd" / "openttd.cfg"),
                                 "-X", "-x", "-I", self.args.graphics, "-d", "net=1,misc=3"],
                        environment=self.environment(worker, renderer=True), cwd=self.state / worker)
 
-            def worker_key(role=role, worker=worker, company=company):
+            def worker_key(role=role, worker=worker, company=company, pooled=pooled):
                 child = self.children[worker]
                 if child.poll() is not None:
                     raise StartupError(f"Renderer {worker} exited during startup; inspect its private log")
@@ -412,18 +487,26 @@ class Stack:
                     return False
                 reply = self.rpc("roster")
                 people = reply.get("result", [])
-                matches = [person for person in people if person.get("public_key", "").lower() == worker_public_key and person.get("company_id") == company]
+                matches = [person for person in people if person.get("public_key", "").lower() == worker_public_key
+                           and (pooled or person.get("company_id") == company)]
                 if len(matches) > 1:
                     raise StartupError("Renderer native identity is ambiguous")
                 if not matches:
                     return False
                 key = worker_public_key
-                prior = self.manifest["renderer_keys"].get(role)
+                field = "capture_slot_keys" if pooled else "renderer_keys"
+                prior = self.manifest.get(field, {}).get(role)
                 if prior and prior != key:
                     raise StartupError("Renderer key differs from the existing world binding")
+                others = [value for name in ("renderer_keys", "capture_slot_keys")
+                          for identifier, value in self.manifest.get(name, {}).items()
+                          if name != field or identifier != role]
+                if key in others:
+                    raise StartupError("Renderer native identities must be distinct")
                 return key
 
-            self.manifest["renderer_keys"][role] = self.wait(f"authenticated renderer {worker}", worker_key)
+            field = "capture_slot_keys" if pooled else "renderer_keys"
+            self.manifest.setdefault(field, {})[role] = self.wait(f"authenticated renderer {worker}", worker_key)
         policies = {}
         for role, binding in self.roles.items():
             policy = {"allow_any": binding["kind"] == "human"}
@@ -439,6 +522,9 @@ class Stack:
             state = self.rpc("checkpoint.status").get("result", {})
             return state.get("status") == "completed" and state.get("checkpoint_id") and state.get("checkpoint_id") != baseline
         self.wait("backend-owned checkpoint after provisioning", checkpoint_ready, timeout=50)
+        if dynamic:
+            self.manifest["dynamic_agents"] = True
+            self.manifest.setdefault("capture_slot_keys", {})
         self.manifest["ready"] = True
         publish_manifest(self.state, self.manifest)
 
@@ -446,8 +532,11 @@ class Stack:
         print(f"\nWorld ready: http://127.0.0.1:{self.args.http_port}/", flush=True)
         if self.args.agent_joins:
             print(f"Agent play: http://127.0.0.1:{self.args.http_port}/llms.txt (text) or /llms-capture.txt (images)")
-            print("Public joins claim one available agent company; use a separate private client state directory per player.")
-        print("Session tokens are in private files; their contents are never printed:")
+            print("Agent registration creates a company; keep its private client state to resume."
+                  if self.args.dynamic_agents else
+                  "Public joins claim one available agent company; use a separate private client state directory per player.")
+        if self.roles:
+            print("Session tokens are in private files; their contents are never printed:")
         for role in self.roles:
             print(f"  {role}: {self.state / 'credentials' / (role + '.token')}")
         if self.args.profile in ("mixed", "overnight"):
@@ -461,14 +550,16 @@ class Stack:
         elif self.args.profile == "luna":
             print("Luna companies: text 0 / visual 1 cooperate; text 2 / visual 3 compete.")
             print("Native companies are closed to other clients; visual companies admit their authenticated workers.")
-        else:
+        elif self.args.profile == "overnight":
             print("Overnight company IDs: human visual 0; passenger road/rail/mixed 1/2/3; goods road/rail/mixed 4/5/6.")
             print("Only r0 is a native renderer. Text companies are closed to native joins.")
+        else:
+            print(f"Public world: companies are created on demand; {len(self.capture_slots)} capture worker slots.")
         print("Ctrl+C stops this group and preserves state. Restart with the same command.", flush=True)
         reported = set()
         while not self.stop_requested:
             self.check_critical()
-            for worker in self.workers.values():
+            for worker in (*self.workers.values(), *self.capture_slots.values()):
                 child = self.children[worker]
                 if child.poll() is not None and worker not in reported:
                     reported.add(worker)
@@ -477,7 +568,7 @@ class Stack:
 
     def close(self):
         # Stop admission first. The last completed backend checkpoint is the restart boundary.
-        for name in ("backend", *self.workers.values(), "engine"):
+        for name in ("backend", *self.workers.values(), *self.capture_slots.values(), "engine"):
             child = self.children.get(name)
             if child is None:
                 continue
@@ -523,8 +614,12 @@ def parse_args(argv=None):
     parser.add_argument("--baseset", type=Path, required=True, help="directory containing the installed base graphics")
     parser.add_argument("--state-dir", type=Path, required=True, help="new empty or existing private world directory")
     parser.add_argument("--world", required=True, help="stable local world ID")
-    parser.add_argument("--profile", choices=("mixed", "luna", "overnight"), default="mixed",
-                        help="fixed mixed (default), four-company Luna, or seven-company overnight layout")
+    parser.add_argument("--profile", choices=("mixed", "luna", "overnight", "public"), default="mixed",
+                        help="fixed experiment layout or public dynamic registration without precreated companies")
+    parser.add_argument("--capture-workers", type=int, choices=range(16), default=2,
+                        help="dynamic mode's bounded spectator renderer capacity, 0..15 (default 2)")
+    parser.add_argument("--dynamic-agents", action="store_true",
+                        help="add on-demand companies and spectator capture slots to an existing profile")
     parser.add_argument("--native-port", type=port, default=3979)
     parser.add_argument("--http-port", type=port, default=8080)
     parser.add_argument("--transport", choices=("asgi", "http"), default="asgi", help="ASGI (default) or explicit local-development HTTP fallback")
@@ -536,7 +631,17 @@ def parse_args(argv=None):
     parser.add_argument("--seed", type=generation_seed, help="new generated world's seed; luna defaults to 20261018, overnight to 20261021")
     parser.add_argument("--initial-save", type=Path, help="optional starting save for a new world; restart always uses the checkpoint")
     args = parser.parse_args(argv)
+    if args.profile == "public":
+        args.dynamic_agents = True
+    if not args.dynamic_agents and args.capture_workers != 2:
+        parser.error("--capture-workers requires public profile or --dynamic-agents")
     args.roles, args.workers = profile_bindings(args.profile)
+    args.capture_slots = ({f"capture-{number}": f"rp{number}" for number in range(args.capture_workers)}
+                          if args.dynamic_agents else {})
+    if len(args.workers) + len(args.capture_slots) > 15:
+        parser.error("legacy renderers and capture workers together may not exceed 15")
+    if args.dynamic_agents:
+        args.agent_joins = True
     if args.map_size is None:
         args.map_size = 128 if args.profile == "luna" else 512
     if args.profile == "luna" and args.seed is None:

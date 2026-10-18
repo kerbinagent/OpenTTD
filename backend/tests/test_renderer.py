@@ -137,6 +137,7 @@ class RendererGatewayTests(unittest.TestCase):
         image = self.gateway.capture(p)
         self.assertEqual(set(image), {"image_id", "width", "height"})
         self.assertEqual(self.gateway.image(p, image["image_id"]), png())
+
         bind = [call for call in self.fake1.calls if call["type"] == "session.bind"]
         self.assertEqual(len(bind), 1)
         self.assertEqual(bind[0]["actor"], {"identity_id": "alice", "company_id": 1,
@@ -151,6 +152,76 @@ class RendererGatewayTests(unittest.TestCase):
         self.assert_code("image_unavailable", lambda: self.gateway.control(p, {
             "image_id": image["image_id"], "action": "zoom", "steps": 1}))
         self.assertEqual(self.gateway.image(p, image["image_id"]), png())
+
+    def test_dynamic_slots_start_idle_and_keep_immutable_actor_and_image_scope(self):
+        dir2 = self.root / "b"
+        dir2.mkdir(mode=0o700)
+        fake2 = FakeRenderer(self.root / "b.sock", dir2)
+        self.fake1.native_key, fake2.native_key = "AB" * 32, "cd" * 32
+        gateway = RendererGateway({}, "world", slots={
+            "capture-0": (self.fake1, self.dir1), "capture-1": (fake2, dir2),
+        })
+        self.addCleanup(gateway.close)
+        p, other = principal(), principal("run2", 2, "bob")
+        self.assertEqual(gateway.worker_slots(), ("capture-0", "capture-1"))
+        self.assertFalse(gateway.available(p))
+        self.assertEqual(gateway.verified_native_worker_keys(), {"ab" * 32, "cd" * 32})
+        self.assertEqual(gateway.worker_key("capture-0"), "ab" * 32)
+        self.assertFalse(any(call["type"] == "session.bind" for call in self.fake1.calls))
+        gateway.assign_slot("capture-0", p)
+        gateway.assign_slot("capture-0", p)
+        gateway.assign_slot("capture-1", other)
+        gateway.check_ready(p)
+        image = gateway.capture(p)
+        self.assertEqual(gateway.image(p, image["image_id"]), png())
+        self.assert_code("image_unavailable", lambda: gateway.image(other, image["image_id"]))
+        for slot, changed in (("capture-0", other), ("capture-1", p),
+                              ("capture-0", principal(company=2)),
+                              ("capture-0", principal(identity="mallory")),
+                              ("capture-0", principal(mode="text"))):
+            self.assert_code("forbidden", lambda slot=slot, changed=changed:
+                             gateway.assign_slot(slot, changed))
+
+    def test_dynamic_slot_assignment_race_cannot_share_one_worker(self):
+        gateway = RendererGateway({}, "world", slots={"capture-0": (self.fake1, self.dir1)})
+        self.addCleanup(gateway.close)
+        barrier = threading.Barrier(2)
+
+        def assign(p):
+            barrier.wait(timeout=5)
+            try:
+                gateway.assign_slot("capture-0", p)
+                return True
+            except ServiceError as exc:
+                self.assertEqual(exc.code, "forbidden")
+                return False
+
+        players = [principal(), principal("run2", 2, "bob")]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            result = list(pool.map(assign, players))
+        self.assertEqual(sum(result), 1)
+        self.assertEqual([gateway.available(p) for p in players], result)
+
+    def test_dynamic_idle_key_failure_keeps_managed_provenance(self):
+        self.fake1.native_key = "ab" * 32
+        gateway = RendererGateway({}, "world", slots={"capture-0": (self.fake1, self.dir1)})
+        self.addCleanup(gateway.close)
+        self.assertEqual(gateway.worker_key("capture-0"), "ab" * 32)
+        self.fake1.native_key = "malformed"
+        self.assert_code("renderer_unavailable", gateway.verified_native_worker_keys)
+        self.assertEqual(gateway.known_native_worker_keys(), set())
+        self.assertEqual(gateway.managed_native_worker_keys(), {"ab" * 32})
+        self.assert_code("renderer_unavailable", lambda: gateway.worker_key("unknown"))
+
+    def test_legacy_and_dynamic_slots_cannot_share_native_key(self):
+        other_dir = self.root / "pooled"
+        other_dir.mkdir(mode=0o700)
+        pooled = FakeRenderer(self.root / "pooled.sock", other_dir)
+        self.fake1.native_key = pooled.native_key = "ab" * 32
+        gateway = RendererGateway({"run1": (self.fake1, self.dir1)}, "world",
+                                  slots={"capture-0": (pooled, other_dir)})
+        self.addCleanup(gateway.close)
+        self.assert_code("renderer_unavailable", gateway.verified_native_worker_keys)
 
     def test_text_run_captures_and_cross_run_or_company_cannot_read(self):
         dir2 = self.root / "b"

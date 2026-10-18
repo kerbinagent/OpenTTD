@@ -940,6 +940,9 @@ CommandCost CmdCompanyCtrl(DoCommandFlags flags, CompanyCtrlAction cca, CompanyI
 
 			NetworkAdminCompanyNew(c);
 			NetworkServerNewCompany(c, ci);
+#ifdef WITH_INTEGRATION
+			Integration::CompanyCreated(c->index);
+#endif
 
 			/* This is the client (or non-dedicated server) who wants a new company */
 			if (client_id == _network_own_client_id) {

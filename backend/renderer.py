@@ -46,6 +46,7 @@ class _Worker:
     engine: object
     artifacts: Path
     directory_fd: int
+    key_id: str = ""
     lock: threading.RLock = field(default_factory=threading.RLock)
     actor: tuple | None = None
     instance: str | None = None
@@ -160,13 +161,18 @@ class RendererGateway:
     """One immutable actor and one private artifact directory per renderer socket."""
 
     def __init__(self, workers, world_id, world_epoch="initial", *,
+                 slots=None,
                  max_cache_bytes=32 * 1024 * 1024, max_images=64, ttl=60,
                  capture_interval=1.0, max_managed_worker_keys=1024,
                  clock=time.monotonic, wall_clock=time.time):
         if not isinstance(world_id, str) or not world_id or not isinstance(world_epoch, str) or not world_epoch:
             raise ValueError("world and epoch are required")
-        if not isinstance(workers, dict) or not isinstance(max_cache_bytes, int) or max_cache_bytes < 1 or not isinstance(max_images, int) or max_images < 1 or ttl <= 0:
+        if (not isinstance(workers, dict) or (slots is not None and not isinstance(slots, dict))
+                or not isinstance(max_cache_bytes, int) or max_cache_bytes < 1 or not isinstance(max_images, int) or max_images < 1 or ttl <= 0):
             raise ValueError("invalid renderer configuration")
+        slots = {} if slots is None else slots
+        if len(slots) > 15 or (slots and len(workers) + len(slots) > 15):
+            raise ValueError("at most 15 combined renderer workers are supported")
         if type(max_managed_worker_keys) is not int or not 1 <= max_managed_worker_keys <= 1024:
             raise ValueError("max_managed_worker_keys must be between 1 and 1024")
         try:
@@ -190,6 +196,9 @@ class RendererGateway:
         self._observation_time_highwater = 0
         self._observation_slots = threading.BoundedSemaphore(4)
         self._workers = {}
+        self._slots = {}
+        self._registry = {}
+        self._registry_lock = threading.Lock()
         self._cache = OrderedDict()
         self._cache_bytes = 0
         self._cache_lock = threading.RLock()
@@ -205,9 +214,12 @@ class RendererGateway:
         directories = set()
         directory_inodes = set()
         try:
-            for run_id, config in workers.items():
-                if not isinstance(run_id, str) or not run_id:
-                    raise ValueError("invalid renderer run")
+            entries = [(False, run_id, config) for run_id, config in workers.items()]
+            entries += [(True, slot_id, config) for slot_id, config in slots.items()]
+            for pooled, identifier, config in entries:
+                if (not isinstance(identifier, str) or not identifier or len(identifier) > 128
+                        or (pooled and not _INSTANCE_ID.fullmatch(identifier))):
+                    raise ValueError("invalid renderer run or slot")
                 if isinstance(config, dict):
                     engine, artifacts = config["engine"], config["artifacts"]
                 else:
@@ -231,7 +243,13 @@ class RendererGateway:
                 if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
                     os.close(fd)
                     raise ValueError("renderer artifact directory changed")
-                self._workers[run_id] = _Worker(run_id, engine, directory, fd)
+                key_id = ("slot:" if pooled else "run:") + identifier
+                worker = _Worker("" if pooled else identifier, engine, directory, fd, key_id=key_id)
+                self._registry[key_id] = worker
+                if pooled:
+                    self._slots[identifier] = worker
+                else:
+                    self._workers[identifier] = worker
         except Exception:
             self.close()
             raise
@@ -241,7 +259,7 @@ class RendererGateway:
             self._native_keys.clear()
             self._managed_native_keys.clear()
             self._managed_keys_overflow = False
-        for worker in self._workers.values():
+        for worker in self._registry.values():
             if worker.directory_fd >= 0:
                 os.close(worker.directory_fd)
                 worker.directory_fd = -1
@@ -249,13 +267,49 @@ class RendererGateway:
     def available(self, principal):
         return principal.world_id == self.world_id and principal.run_id in self._workers
 
+    def worker_slots(self):
+        """List trusted dynamic capacity; no public request selects a slot."""
+        return tuple(sorted(self._slots))
+
+    def assign_slot(self, slot_id, principal):
+        """Restore a durable once-only slot assignment without issuing native IPC."""
+        worker = self._slots.get(slot_id)
+        if (worker is None or principal.world_id != self.world_id
+                or principal.mode != "visual" or principal.kind != "agent"
+                or not isinstance(principal.run_id, str) or not principal.run_id):
+            raise ServiceError("forbidden", status=403)
+        actor = tuple(getattr(principal, field) for field in _ACTOR_FIELDS)
+        with self._registry_lock:
+            previous = self._workers.get(principal.run_id)
+            if ((previous is not None and previous is not worker)
+                    or (worker.actor is not None and worker.actor != actor)
+                    or (worker.run_id and worker.run_id != principal.run_id)):
+                raise ServiceError("forbidden", status=403)
+            worker.actor = actor
+            worker.run_id = principal.run_id
+            # Readers retain a stable dictionary snapshot while new joins attach.
+            self._workers = {**self._workers, principal.run_id: worker}
+
+    def worker_key(self, slot_id):
+        """Read one trusted slot's connected native identity, never a roster label."""
+        worker = self._slots.get(slot_id)
+        if worker is None:
+            raise _unavailable()
+        with worker.lock:
+            instance = self._refresh(worker)
+            with self._cache_key_lock:
+                entry = self._native_keys.get(worker.key_id)
+                if entry is None or entry[0] != instance:
+                    raise _unavailable()
+                return entry[1]
+
     def check_ready(self, principal):
         """Verify and bind only this run's connected renderer for fresh admission."""
         worker = self._worker(principal)
         with worker.lock:
             instance = self._refresh(worker)
             with self._cache_key_lock:
-                entry = self._native_keys.get(principal.run_id)
+                entry = self._native_keys.get(worker.key_id)
                 if entry is None or entry[0] != instance:
                     raise _unavailable()
             actor, _ = self._actor(principal, worker)
@@ -265,11 +319,11 @@ class RendererGateway:
         """Return only recently seen renderer client keys; never issue IPC."""
         now = self.clock()
         with self._cache_key_lock:
-            for run_id, (instance, _, seen) in list(self._native_keys.items()):
-                worker = self._workers.get(run_id)
+            for key_id, (instance, _, seen) in list(self._native_keys.items()):
+                worker = self._registry.get(key_id)
                 if (worker is None or worker.instance != instance or
                         now - seen > _KEY_FRESHNESS):
-                    del self._native_keys[run_id]
+                    del self._native_keys[key_id]
             return {key for _, key, _ in self._native_keys.values()}
 
     def managed_native_worker_keys(self):
@@ -282,12 +336,11 @@ class RendererGateway:
         with self._cache_key_lock:
             if self._managed_keys_overflow:
                 raise _unavailable()
-        for run_id in sorted(self._workers):
-            worker = self._workers[run_id]
+        for key_id, worker in sorted(self._registry.items()):
             with worker.lock:
                 instance = self._refresh(worker)
                 with self._cache_key_lock:
-                    entry = self._native_keys.get(run_id)
+                    entry = self._native_keys.get(key_id)
                     if (self._managed_keys_overflow or entry is None or
                             entry[0] != instance):
                         raise _unavailable()
@@ -298,7 +351,7 @@ class RendererGateway:
 
     def _clear_native_key(self, worker):
         with self._cache_key_lock:
-            self._native_keys.pop(worker.run_id, None)
+            self._native_keys.pop(worker.key_id, None)
 
     def configure_authority(self, instance_id, max_lag_ticks):
         """Set the trusted world's renderer lease fence, never from a public body."""
@@ -391,7 +444,11 @@ class RendererGateway:
         if isinstance(native_key, str) and _NATIVE_KEY.fullmatch(native_key):
             with self._cache_key_lock:
                 canonical_key = native_key.lower()
-                self._native_keys[worker.run_id] = (instance, canonical_key, self.clock())
+                if any(key_id != worker.key_id and entry[1] == canonical_key
+                       for key_id, entry in self._native_keys.items()):
+                    self._native_keys.pop(worker.key_id, None)
+                    raise _unavailable()
+                self._native_keys[worker.key_id] = (instance, canonical_key, self.clock())
                 if canonical_key not in self._managed_native_keys:
                     if len(self._managed_native_keys) >= self.max_managed_worker_keys:
                         self._managed_keys_overflow = True
@@ -424,7 +481,7 @@ class RendererGateway:
 
     def _drop_run_locked(self, worker):
         for key in list(self._cache):
-            if self._workers[key[0]] is worker:
+            if self._workers.get(key[0]) is worker:
                 self._remove(key)
 
     def _remove(self, key):

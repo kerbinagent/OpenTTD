@@ -24,7 +24,7 @@ from urllib.parse import unquote
 from urllib.request import Request, urlopen
 
 from backend import http
-from backend.__main__ import _renderer_config, main
+from backend.__main__ import _renderer_config, _renderer_configuration, main
 from backend.client import BackendClient, BackendError, MAX_IMAGE_BYTES, credential_from_env_or_file
 from backend.errors import ServiceError
 from backend.observations import ObservationImage
@@ -581,6 +581,76 @@ class CLITest(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("must be supplied together", result.stderr)
             self.assertFalse(os.path.exists(database))
+
+    def test_operator_slot_config_needs_no_company_or_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(os.path.join(directory, "state.db"))
+            self.addCleanup(store.close)
+            artifacts = os.path.join(directory, "images")
+            os.mkdir(artifacts, 0o700)
+            path = os.path.join(directory, "renderers.json")
+            config = {"version": 2, "world_id": "world", "slots": {
+                "capture-0": {"socket": os.path.join(directory, "r0.sock"), "artifacts": artifacts},
+            }}
+
+            def write(value):
+                with open(path, "w", encoding="utf-8") as file:
+                    json.dump(value, file)
+                os.chmod(path, 0o600)
+
+            write(config)
+            self.assertEqual(_renderer_configuration(path, store, "world"), ({}, config["slots"]))
+            self.assertEqual(store.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0], 0)
+            with self.assertRaises(ValueError):
+                _renderer_config(path, store, "world")
+            for invalid in (
+                {**config, "extra": {}}, {**config, "world_id": "wrong"},
+                {**config, "slots": {"/tmp/public-path": next(iter(config["slots"].values()))}},
+                {**config, "slots": {**config["slots"], "capture-1": next(iter(config["slots"].values()))}},
+            ):
+                write(invalid)
+                with self.subTest(config=invalid), self.assertRaises(ValueError):
+                    _renderer_configuration(path, store, "world")
+
+            token = store.provision("world", "legacy", 0, mode="visual")
+            run = store.authenticate(token).run_id
+            legacy_images = os.path.join(directory, "legacy-images")
+            os.mkdir(legacy_images, 0o700)
+            legacy = {run: {"socket": os.path.join(directory, "legacy.sock"), "artifacts": legacy_images}}
+            combined = {**config, "runs": legacy}
+            write(combined)
+            self.assertEqual(_renderer_configuration(path, store, "world"), (legacy, config["slots"]))
+            duplicated = {**combined, "runs": {run: next(iter(config["slots"].values()))}}
+            write(duplicated)
+            with self.assertRaises(ValueError):
+                _renderer_configuration(path, store, "world")
+            write({**config, "slots": {f"capture-{i}": next(iter(config["slots"].values())) for i in range(16)}})
+            with self.assertRaises(ValueError):
+                _renderer_configuration(path, store, "world")
+
+    def test_dynamic_operator_wiring_accepts_a_world_without_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "state.db")
+            store = Store(database)
+            store.connection.execute("INSERT INTO worlds(id,epoch) VALUES('world','epoch')")
+            store.close()
+            path = os.path.join(directory, "renderers.json")
+            with open(path, "w", encoding="utf-8") as file:
+                json.dump({"version": 2, "world_id": "world", "slots": {}}, file)
+            os.chmod(path, 0o600)
+            with (mock.patch("backend.renderer.RendererGateway") as gateway,
+                  mock.patch("backend.admission.DynamicAgentAdmission", create=True) as admission,
+                  mock.patch("backend.service.Service") as service,
+                  mock.patch("backend.http.create_server"),
+                  contextlib.redirect_stderr(io.StringIO())):
+                self.assertEqual(main(["serve", "--transport", "http", "--database", database,
+                    "--world", "world", "--engine-socket", os.path.join(directory, "engine.sock"),
+                    "--renderer-config", path, "--dynamic-agents"]), 0)
+            self.assertEqual(gateway.call_args.args[0], {})
+            self.assertEqual(gateway.call_args.kwargs["slots"], {})
+            self.assertEqual(admission.call_args.args[1:], ("world", gateway.return_value))
+            self.assertIsNone(admission.call_args.kwargs["legacy"])
+            self.assertIs(service.call_args.kwargs["admission"], admission.return_value)
 
     def test_four_renderer_operator_map_is_scoped_and_strict(self):
         with tempfile.TemporaryDirectory() as directory:

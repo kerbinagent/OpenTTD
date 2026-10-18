@@ -352,7 +352,9 @@ class BackendHandler(BaseHTTPRequestHandler):
             if method == "GET" and self.path in _STATIC:
                 self._static(self.path)
                 return
-            token = self._token()
+            # This exact route projects only already-public model labels. All
+            # gameplay, identity, participant and image routes still use bearer auth.
+            token = None if method == "GET" and split.path == "/v1/model-reports" else self._token()
             try:
                 entries = parse_qsl(split.query, keep_blank_values=True, max_num_fields=64)
             except ValueError:

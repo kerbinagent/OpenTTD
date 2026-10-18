@@ -321,7 +321,7 @@ def create_app(service: object, web_root=None) -> Starlette:
                     "Content-Type": content_type, "Cache-Control": "no-cache",
                     "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
                 })
-            token = _token(request)
+            token = None if request.method == "GET" and raw_path == b"/v1/model-reports" else _token(request)
             path, query = _path_and_query(request)
             if path == "/v1/events" and request.method == "GET" and _wants_events(request):
                 if not await stream_slots.acquire():

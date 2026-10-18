@@ -187,8 +187,8 @@ static CommandQueue _local_wait_queue;
 /** Local queue of packets waiting for execution. */
 static CommandQueue _local_execution_queue;
 #ifdef WITH_INTEGRATION
-/** Separate bounded company queues; agents do not share the operator's larger allowance. */
-static std::array<CommandQueue, MAX_COMPANIES> _integration_wait_queues;
+/** Bounded company queues plus one spectator registration lane; no operator allowance. */
+static std::array<CommandQueue, MAX_COMPANIES + 1> _integration_wait_queues;
 static uint _integration_next_company = 0;
 #endif
 
@@ -284,8 +284,11 @@ void NetworkSendCommand(Commands cmd, StringID err_message, CommandCallback *cal
 
 #ifdef WITH_INTEGRATION
 	if (_network_server && Integration::SubmissionToken() != 0) {
-		if (company.base() >= MAX_COMPANIES) return;
-		auto &queue = _integration_wait_queues[company.base()];
+		/* The final bounded lane is solely for internal company registration.
+		 * Its native packet remains a spectator command on every replica. */
+		bool registration = company == COMPANY_SPECTATOR && cmd == Commands::CompanyControl;
+		if (company.base() >= MAX_COMPANIES && !registration) return;
+		auto &queue = _integration_wait_queues[registration ? MAX_COMPANIES : company.base()];
 		if (queue.size() >= 128) return;
 		c.integration_token = Integration::SubmissionToken();
 		c.my_cmd = false;
@@ -460,8 +463,8 @@ void NetworkDistributeCommands()
 #ifdef WITH_INTEGRATION
 	/* At frame_freq=0, publish one revalidated agent command first, then native commands.
 	 * This makes generation checks apply before the same command is replayed everywhere. */
-	for (uint checked = 0; checked < MAX_COMPANIES; checked++) {
-		uint company = _integration_next_company++ % MAX_COMPANIES;
+	for (uint checked = 0; checked < _integration_wait_queues.size(); checked++) {
+		uint company = _integration_next_company++ % _integration_wait_queues.size();
 		auto &queue = _integration_wait_queues[company];
 		if (queue.empty()) continue;
 		CommandPacket command = std::move(queue.front());

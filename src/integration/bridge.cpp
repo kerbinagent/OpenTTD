@@ -22,11 +22,13 @@
 #include "../network/network_client.h"
 #include "../network/network_func.h"
 #include "../network/network_internal.h"
+#include "../network/network_server.h"
 #include "../openttd.h"
 #include "../rev.h"
 #include "../saveload/saveload.h"
 #include "../saveload/saveload_func.h"
 #include "../settings_type.h"
+#include "../string_func.h"
 #include "../timer/timer_game_tick.h"
 #include "../3rdparty/monocypher/monocypher.h"
 #include <cstdlib>
@@ -72,11 +74,25 @@ struct PendingAction {
 	std::optional<VisualCommand> visual;
 	unsigned queued = 0;
 	std::optional<Json> prequeue_failure = std::nullopt;
+	std::optional<Json> registration_owner = std::nullopt;
+	std::optional<CompanyID> registered_company = std::nullopt;
 };
 
 bool UsesImageInput(const PendingAction &pending)
 {
-	return pending.action.at("name") == "ui.apply";
+	return pending.action.value("name", std::string()) == "ui.apply";
+}
+
+bool IsRegistrationRun(std::string_view run)
+{
+	return run.starts_with("registration-");
+}
+
+bool ValidRegistrationRun(std::string_view run)
+{
+	return IsRegistrationRun(run) && run.size() == 45 && std::ranges::all_of(run.substr(13), [](unsigned char c) {
+		return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+	});
 }
 
 struct Client {
@@ -209,6 +225,15 @@ Json ReadActor(const Json &request)
 	return actor;
 }
 
+Json ReadRegistrationOwner(const Json &request)
+{
+	const auto &owner = request.at("owner");
+	if (!owner.is_object() || owner.size() != 3 || !ValidString(owner.at("identity_id")) ||
+			!owner.at("run_id").is_string() || !ValidRegistrationRun(owner.at("run_id").get_ref<const std::string &>()) ||
+			!owner.at("mode").is_string() || (owner.at("mode") != "text" && owner.at("mode") != "visual")) throw std::invalid_argument("invalid registration owner");
+	return owner;
+}
+
 bool Bound(const Json &actor)
 {
 	auto &s = GetState();
@@ -237,21 +262,25 @@ Json Canonical(const Json &request, const Json &actor, const char *kind)
 {
 	Json payload = {{"type", kind}, {"actor", actor}};
 	if (std::string_view(kind) == "chat.publish") payload["message"] = request.at("message");
+	else if (std::string_view(kind) == "company.register") payload["owner"] = ReadRegistrationOwner(request);
 	else {
+		if (std::string_view(kind) != "action.submit") throw std::invalid_argument("invalid request type");
 		payload["action"] = request.at("action");
 		if (request.at("action").value("name", std::string()) == "ui.apply") payload["visual_intent"] = request.at("visual_intent");
 	}
 	return payload;
 }
 
-Json ServiceActor()
+Json ServiceActor(std::string_view kind = "chat.publish")
 {
-	return {{"identity_id", "backend-chat"}, {"company_id", 255U}, {"run_id", "backend-chat"}, {"mode", "text"}};
+	const char *name = kind == "company.register" ? "backend-registration" : "backend-chat";
+	return {{"identity_id", name}, {"company_id", 255U}, {"run_id", name}, {"mode", "text"}};
 }
 
 Json RequestActor(const Json &request)
 {
-	return request.value("request_type", std::string()) == "chat.publish" ? ServiceActor() : ReadActor(request);
+	auto kind = request.value("request_type", std::string());
+	return kind == "chat.publish" || kind == "company.register" ? ServiceActor(kind) : ReadActor(request);
 }
 
 const char *Lifecycle(RequestState state)
@@ -594,6 +623,7 @@ Json Handle(const Json &request)
 		Json result = {{"engine_instance_id", s.instance}, {"world_epoch", s.epoch}, {"role", RendererIsActive() ? "renderer" : "world"},
 			{"capabilities", std::move(capabilities)}, {"native_max_lag_ticks", _settings_client.network.max_lag_time}, {"baseline_hash", std::string(_openttd_revision_hash)},
 			{"recovery_required", s.ledger ? s.ledger->RecoveryRequired() : false}, {"pause", pause_available ? ObservePauseStatus() : Json()}};
+		if (!RendererIsActive()) result["company_registration"] = {{"version", 1}};
 		if (RendererIsActive()) {
 			result["observation_version"] = 1;
 			const NetworkClientInfo *native = _networking && !_network_server && MyClient::IsConnected() ? NetworkClientInfo::GetByClientID(_network_own_client_id) : nullptr;
@@ -621,8 +651,20 @@ Json Handle(const Json &request)
 		if (!Company::IsValidID(CompanyID(actor.at("company_id").get<uint8_t>()))) return Reply(request, "rejected", {}, "company_unavailable");
 		std::string run = actor.at("run_id").get<std::string>();
 		auto found = s.sessions.find(run);
+		if (request.contains("owner_bound") && !request.at("owner_bound").is_boolean()) return Reply(request, "rejected", {}, "invalid_binding");
+		/* Dynamic ownership is established only by the actual native creation.
+		 * Unknown runs cannot acquire a reused numeric company via legacy bind. */
+		if (!RendererIsActive() && found == s.sessions.end() &&
+				(IsRegistrationRun(run) || request.value("owner_bound", false))) return Reply(request, "rejected", {}, "session_unbound");
 		if (found != s.sessions.end() && found->second != actor) return Reply(request, "rejected", {}, "binding_conflict");
 		if (found != s.sessions.end() && !Bound(actor)) return Reply(request, "rejected", {}, "stale_company_binding");
+		/* Authority-only ownership verification is read-only. Existing scoped
+		 * credentials must remain verifiable while a checkpoint is saving. */
+		if (!RendererIsActive() && request.value("owner_bound", false) && found != s.sessions.end()) {
+			if (!AuthoritativeReady() || !s.ledger || !s.ledger->Healthy() || s.world_replaced || !s.load_reconciled) return Reply(request, "rejected", {}, "world_unavailable");
+			if (s.ledger->RecoveryRequired()) return Reply(request, "rejected", {}, "world_recovering");
+			return Reply(request, "completed", {{"bound", true}});
+		}
 		if (s.sessions.size() >= MAX_SESSIONS && found == s.sessions.end()) return Reply(request, "rejected", {}, "binding_limit");
 		if (s.checkpoint) return Reply(request, "rejected", {}, "checkpoint_busy");
 		if (RendererIsActive()) {
@@ -670,6 +712,70 @@ Json Handle(const Json &request)
 	if (type == "action.ack") {
 		uint64_t through = request.contains("through_sequence") ? Unsigned(request, "through_sequence") : Unsigned(request, "request_sequence");
 		return s.ledger->AckThrough(through) ? Reply(request, "completed", {{"retired_through", s.ledger->RetiredThrough()}}) : Reply(request, "rejected", {}, "checkpoint_required");
+	}
+	if (type == "company.register") {
+		if (request.contains("actor")) return Reply(request, "rejected", {}, "operator_context_required");
+		Json owner = ReadRegistrationOwner(request);
+		Json actor = ServiceActor("company.register");
+		auto identity = Identity(request, actor);
+		/* Duplicates retain their exact historical receipt even if the owner has
+		 * since been deleted. Status never allocates a replacement company. */
+		if (auto entry = s.ledger->Lookup(identity)) {
+			if (entry->binding != Binding(actor) || entry->canonical_payload != Canonical(request, actor, "company.register").dump()) return Reply(request, "rejected", {}, "request_conflict");
+			return EntryReply(request, *entry);
+		}
+		if (s.checkpoint) return Reply(request, "rejected", {}, "checkpoint_busy");
+		auto admission = s.ledger->Reserve(identity, Binding(actor), Canonical(request, actor, "company.register"), s.ledger->Fence());
+		if (admission.status != AdmissionStatus::Admitted) return AdmissionReply(request, admission);
+		auto [it, inserted] = s.pending.emplace(identity.request_sequence, PendingAction{identity, actor, Json::object(), Json::array(), std::nullopt, 0});
+		auto &pending = it->second;
+		pending.registration_owner = owner;
+		const auto &run = owner.at("run_id").get_ref<const std::string &>();
+		const char *failure = s.sessions.contains(run) ? "binding_conflict" :
+			s.sessions.size() >= MAX_SESSIONS ? "binding_limit" :
+			Company::GetNumItems() >= _settings_client.network.max_companies || !Company::CanAllocateItem() ? "company_limit" :
+			_settings_client.network.frame_freq != 0 ? "frame_frequency_unsupported" : nullptr;
+		if (failure != nullptr) { Reject(pending, failure); s.pending.erase(it); return EntryReply(request, *s.ledger->Lookup(identity)); }
+		bool posted = false;
+		try {
+			AutoRestoreBackup current(_current_company, COMPANY_SPECTATOR);
+			s.submitting = identity.request_sequence;
+			posted = Command<Commands::CompanyControl>::Post(CompanyCtrlAction::New, CompanyID::Invalid(), CompanyRemoveReason::None, static_cast<ClientID>(UINT32_MAX - 1));
+			s.submitting = 0;
+		} catch (const std::exception &) { s.submitting = 0; }
+		if (!posted || pending.queued != 1) {
+			Reject(pending, "company_creation_failed");
+			if (pending.queued == 0) s.pending.erase(it);
+		}
+		return EntryReply(request, *s.ledger->Lookup(identity));
+	}
+	if (type == "renderer.attach") {
+		if (request.contains("actor")) return Reply(request, "rejected", {}, "operator_context_required");
+		Json owner = ReadActor({{"actor", request.at("owner")}});
+		if (s.ledger->RecoveryRequired()) return Reply(request, "rejected", {}, "world_recovering");
+		if (s.checkpoint) return Reply(request, "rejected", {}, "checkpoint_busy");
+		if (!Bound(owner) || owner.at("mode") != "visual") return Reply(request, "rejected", {}, "stale_company_binding");
+		const Json &key_value = request.at("native_public_key");
+		if (!key_value.is_string()) return Reply(request, "rejected", {}, "invalid_company_key");
+		const auto &key = key_value.get_ref<const std::string &>();
+		if (key.size() != 64 || !std::ranges::all_of(key, [](unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) return Reply(request, "rejected", {}, "invalid_company_key");
+		CompanyID company(owner.at("company_id").get<uint8_t>());
+		const Company *target = Company::Get(company);
+		if (target->allow_any || !target->allow_list.Contains(key)) return Reply(request, "rejected", {}, "renderer_not_authorized");
+		NetworkClientInfo *matched = nullptr;
+		for (NetworkClientInfo *info : NetworkClientInfo::Iterate()) {
+			if (!StrEqualsIgnoreCase(info->public_key, key) || info->client_id == ClientID::Server || info->client_id == ClientID::Invalid) continue;
+			NetworkClientSocket *socket = NetworkClientSocket::GetByClientID(info->client_id);
+			/* Check the socket BEFORE NetworkServerDoMove: it mutates client_playas
+			 * even when its later authorization check returns early. */
+			if (socket == nullptr || socket->status != NetworkClientSocket::ClientStatus::Active || socket->GetInfo() != info) return Reply(request, "rejected", {}, "renderer_not_ready");
+			if (matched != nullptr) return Reply(request, "rejected", {}, "renderer_ambiguous");
+			matched = info;
+		}
+		if (matched == nullptr) return Reply(request, "rejected", {}, "renderer_not_ready");
+		if (matched->client_playas != COMPANY_SPECTATOR && matched->client_playas != company) return Reply(request, "rejected", {}, "renderer_binding_conflict");
+		NetworkServerDoMove(matched->client_id, company);
+		return Reply(request, "completed", {{"company_id", company.base()}, {"attached", matched->client_playas == company}});
 	}
 	if (type == "company.ensure") {
 		if (request.contains("actor")) return Reply(request, "rejected", {}, "operator_context_required");
@@ -805,19 +911,21 @@ Json Handle(const Json &request)
 		return result.contains("error") ? Reply(request, "rejected", {}, "query_rejected") : Reply(request, "completed", std::move(result));
 	}
 	if (type == "action.submit" || type == "action.status") {
-		bool chat_status = type == "action.status" && request.value("request_type", std::string()) == "chat.publish";
-		Json actor = chat_status ? ServiceActor() : ReadActor(request);
-		if (!chat_status && !Bound(actor)) return Reply(request, "rejected", {}, "session_unbound");
+		auto request_type = request.value("request_type", std::string("action.submit"));
+		bool internal_status = type == "action.status" && (request_type == "chat.publish" || request_type == "company.register");
+		Json actor = internal_status ? ServiceActor(request_type) : ReadActor(request);
+		if (!internal_status && !Bound(actor)) return Reply(request, "rejected", {}, "session_unbound");
 		if (type == "action.submit" && actor.at("mode") != "visual" && request.at("action").value("name", std::string()) == "ui.apply") return Reply(request, "rejected", {}, "mode_restricted");
 		auto identity = Identity(request, actor);
 		if (type == "action.status") {
 			auto entry = s.ledger->Lookup(identity);
 			if (!entry) return Reply(request, identity.request_sequence <= s.ledger->RetiredThrough() ? "retired" : "uncertain");
 			Json canonical = Json::parse(entry->canonical_payload);
-			if (entry->binding != Binding(actor) || canonical.at("actor") != actor ||
+			if (entry->binding != Binding(actor) || canonical.at("actor") != actor || canonical.at("type") != request_type ||
 					(request.contains("action") && canonical.at("action") != request.at("action")) ||
 					(request.contains("visual_intent") && canonical.at("visual_intent") != request.at("visual_intent")) ||
-					(request.contains("message") && canonical.at("message") != request.at("message"))) return Reply(request, "rejected", {}, "request_conflict");
+					(request.contains("message") && canonical.at("message") != request.at("message")) ||
+					(request_type == "company.register" && canonical.at("owner") != ReadRegistrationOwner(request))) return Reply(request, "rejected", {}, "request_conflict");
 			return EntryReply(request, *entry);
 		}
 		if (s.checkpoint) return Reply(request, "rejected", {}, "checkpoint_busy");
@@ -945,10 +1053,20 @@ bool ValidateQueuedCommand(uint64_t token, Commands command)
 	if (found == s.pending.end()) return false;
 	auto entry = s.ledger->Lookup(found->second.identity);
 	if (!entry || entry->state != RequestState::Queued) { s.pending.erase(found); return false; }
-	if (!AuthoritativeReady() || !Bound(found->second.actor) || _settings_client.network.frame_freq != 0 || s.world_replaced) {
+	const bool registration = found->second.registration_owner.has_value();
+	if (!AuthoritativeReady() || (!registration && !Bound(found->second.actor)) || _settings_client.network.frame_freq != 0 || s.world_replaced) {
 		Reject(found->second, "stale_context"); s.pending.erase(found); return false;
 	}
 	if (_pause_mode.Any() && !IsCommandAllowedWhilePaused(command)) { Reject(found->second, "world_paused"); s.pending.erase(found); return false; }
+	if (registration) {
+		const auto &owner = *found->second.registration_owner;
+		const char *failure = command != Commands::CompanyControl ? "invalid_registration_command" :
+			s.sessions.contains(owner.at("run_id").get<std::string>()) ? "binding_conflict" :
+			s.sessions.size() >= MAX_SESSIONS ? "binding_limit" :
+			Company::GetNumItems() >= _settings_client.network.max_companies || !Company::CanAllocateItem() ? "company_limit" : nullptr;
+		if (failure != nullptr) { Reject(found->second, failure); s.pending.erase(found); return false; }
+		return true;
+	}
 	AutoRestoreBackup current(_current_company, CompanyID(found->second.actor.at("company_id").get<uint8_t>()));
 	const auto &action = found->second.action;
 	auto result = found->second.visual ? ValidateVisualCommand(*found->second.visual) :
@@ -962,6 +1080,27 @@ bool ValidateQueuedCommand(uint64_t token, Commands command)
 
 void BeginCommand(uint64_t token) { GetState().executing = token; }
 void EndCommand() { GetState().executing = 0; }
+
+void CompanyCreated(CompanyID company)
+{
+	auto &s = GetState();
+	if (s.executing == 0 || !AuthoritativeReady() || s.world_replaced) return;
+	auto found = s.pending.find(s.executing);
+	if (found == s.pending.end() || !found->second.registration_owner) return;
+	const auto &owner = *found->second.registration_owner;
+	const auto &run = owner.at("run_id").get_ref<const std::string &>();
+	if (found->second.registered_company || s.sessions.contains(run) || !Company::IsValidID(company)) {
+		s.world_replaced = true;
+		return;
+	}
+	Json actor = owner;
+	actor["company_id"] = company.base();
+	/* This hook observes the authoritative allocation only. Native state and
+	 * packet contents remain identical on the server and rendering replicas. */
+	s.sessions.emplace(run, std::move(actor));
+	s.company_generations.emplace(run, Company::Get(company)->GetInstanceGeneration());
+	found->second.registered_company = company;
+}
 
 std::optional<uint64_t> ExecutingQuestionGeneration(CompanyID company, uint16_t question_id)
 {
@@ -988,9 +1127,26 @@ void CommandCompleted(Commands command, const CommandCost &cost, const CommandDa
 	auto found = s.pending.find(s.executing);
 	if (found == s.pending.end()) return;
 	Json result;
-	try { result = UsesImageInput(found->second) ? Json{{"success", cost.Succeeded()}} : FormatCommandResult(command, cost, returned, found->second.action); }
+	bool succeeded = cost.Succeeded();
+	if (found->second.registration_owner) {
+		if (s.world_replaced) {
+			PublishEvent({{"type", "action.status"}, {"actor", found->second.actor}, {"request_id", found->second.identity.request_id},
+				{"request_sequence", found->second.identity.request_sequence}, {"status", "uncertain"}});
+			s.pending.erase(found);
+			return;
+		}
+		/* Native CompanyControl can succeed with no allocation at pool capacity. */
+		succeeded = succeeded && command == Commands::CompanyControl && found->second.registered_company.has_value() && !s.world_replaced;
+		if (succeeded) {
+			Json owner = *found->second.registration_owner;
+			owner["company_id"] = found->second.registered_company->base();
+			succeeded = Bound(owner);
+			if (succeeded) result = {{"company_id", owner.at("company_id")}, {"owner", std::move(owner)}, {"owner_bound", true}};
+		}
+		if (!succeeded) result = {{"error", Error("company_creation_failed")}};
+	} else try { result = UsesImageInput(found->second) ? Json{{"success", succeeded}} : FormatCommandResult(command, cost, returned, found->second.action); }
 	catch (const std::exception &) { result = {{"status", cost.Succeeded() ? "completed" : "rejected"}}; }
-	bool recorded = cost.Succeeded() ? s.ledger->MarkExecuted(found->second.identity, TimerGameTick::counter, _frame_counter, result) :
+	bool recorded = succeeded ? s.ledger->MarkExecuted(found->second.identity, TimerGameTick::counter, _frame_counter, result) :
 		s.ledger->MarkRejected(found->second.identity, TimerGameTick::counter, _frame_counter, result);
 	if (!recorded) {
 		s.world_replaced = true;
@@ -1000,7 +1156,7 @@ void CommandCompleted(Commands command, const CommandCost &cost, const CommandDa
 		return;
 	}
 	PublishEvent({{"type", "action.status"}, {"actor", found->second.actor}, {"request_id", found->second.identity.request_id},
-		{"request_sequence", found->second.identity.request_sequence}, {"status", cost.Succeeded() ? "completed" : "rejected"}, {"result", result}});
+		{"request_sequence", found->second.identity.request_sequence}, {"status", succeeded ? "completed" : "rejected"}, {"result", result}});
 	s.pending.erase(found);
 }
 

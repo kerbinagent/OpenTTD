@@ -1,7 +1,8 @@
 """Portable public player CLI; requires only Python's standard library.
 
-Run ``python -m backend.agent_client --state PRIVATE_DIR join --origin ORIGIN
---mode text`` once, then reuse that state directory for every command. Capture
+Run ``python -m backend.agent_client --state PRIVATE_DIR new --origin ORIGIN
+--mode text --name NAME`` once, then ``--state PRIVATE_DIR resume`` in a later
+session. Keep that private state for every command. Capture
 commands save PNGs: the model host must open them before acting on their content.
 """
 
@@ -51,9 +52,10 @@ def _origin(value):
     return parsed.scheme + "://" + host + suffix
 
 
-def _private_directory(path):
+def _private_directory(path, *, create=True):
     path = Path(path).expanduser().absolute()
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if create:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or (os.name == "posix" and (
             info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077)):
@@ -102,16 +104,47 @@ def _read_private(path, maximum=MAX_STATE_BYTES):
     return data
 
 
+def _company_name(value):
+    if (not isinstance(value, str) or not value or len(value) > 31
+            or "\x00" in value or len(value.encode("utf-8")) > 128):
+        raise ValueError("Choose a nonempty company name of at most 31 Unicode characters and 128 UTF-8 bytes")
+    return value
+
+
+def _registration(value, binding):
+    fields = ("world_epoch", "registration_id")
+    if (not isinstance(value, dict)
+            or any(not isinstance(value.get(field), str) or not value[field]
+                   or len(value[field]) > 256 for field in fields)
+            or value["registration_id"] != binding["run_id"]):
+        raise ValueError("Invalid dynamic company registration")
+    return {field: value[field] for field in fields}
+
+
 def _session(directory):
     value = loads(_read_private(directory / "session.json").decode("utf-8"))
-    if (not isinstance(value, dict) or set(value) - {"version", "origin", "mode", "claim", "binding", "token", "verified"}
-            or value.get("version") != 1 or value.get("mode") not in ("text", "visual")
+    if (not isinstance(value, dict) or set(value) - {"version", "origin", "mode", "claim", "binding", "token", "verified",
+                                                                 "create_intent", "registration", "naming"}
+            or value.get("version") not in (1, 2) or value.get("mode") not in ("text", "visual")
             or not isinstance(value.get("claim"), str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", value["claim"])
             or not isinstance(value.get("origin"), str)
             or _origin(value.get("origin")) != value["origin"]):
         raise ValueError("Invalid saved session; retain it for recovery and use another private directory for a new player")
     if base64.urlsafe_b64encode(base64.urlsafe_b64decode(value["claim"] + "=")).decode().rstrip("=") != value["claim"]:
         raise ValueError("Invalid saved admission claim")
+    if value["version"] == 1:
+        if set(value) & {"create_intent", "registration", "naming"}:
+            raise ValueError("Invalid legacy session")
+    else:
+        intent = value.get("create_intent")
+        if not isinstance(intent, dict) or set(intent) != {"name", "request_id"}:
+            raise ValueError("Invalid saved company creation intent")
+        _company_name(intent["name"])
+        _identifier(intent["request_id"])
+        if "token" in value and (not isinstance(value["token"], str) or value["token"] != value["claim"]):
+            raise ValueError("Saved dynamic credential does not match its registration claim")
+        if "binding" in value:
+            _registration(value.get("registration"), _binding(value["binding"], value["mode"]))
     return value
 
 
@@ -142,6 +175,7 @@ class AgentClient:
         self.actions = SavedActions(self.state / "requests")
         self.images = _private_directory(self.state / "images")
         self.capture_tools = CaptureTools(self.client, self.state)
+        self._setup = None
 
     @classmethod
     def join(cls, origin, state, mode):
@@ -158,6 +192,8 @@ class AgentClient:
                 _write_private(state / "session.json", dumps(saved).encode(), create=True)
             except FileExistsError:
                 saved = _session(state)
+        if saved["version"] != 1:
+            raise ValueError("This state has an explicit new-company intent; recover with the same new command or resume")
         if saved["origin"] != origin or saved["mode"] != mode:
             raise ValueError("Saved player belongs to a different origin or mode; choose a new private directory")
         player = cls(state, saved, token=saved.get("token", saved["claim"]))
@@ -184,11 +220,114 @@ class AgentClient:
         return player
 
     @classmethod
+    def new(cls, origin, state, mode, name):
+        """Create one company, or recover this exact durably saved creation."""
+        origin = _origin(origin)
+        if mode not in ("text", "visual"):
+            raise ValueError("Mode must be text or visual")
+        name = _company_name(name)
+        state = _private_directory(state)
+        fresh = False
+        try:
+            saved = _session(state)
+        except FileNotFoundError:
+            # Refuse unrelated state before the constructor creates journals.
+            if any(state.iterdir()):
+                raise ValueError("New company needs an empty private directory")
+            saved = {"version": 2, "origin": origin, "mode": mode,
+                     "claim": secrets.token_urlsafe(32),
+                     "create_intent": {"name": name, "request_id": uuid.uuid4().hex}}
+            try:
+                _write_private(state / "session.json", dumps(saved).encode(), create=True)
+                fresh = True
+            except FileExistsError:
+                saved = _session(state)
+        if (saved["version"] != 2 or saved["origin"] != origin or saved["mode"] != mode
+                or saved["create_intent"]["name"] != name):
+            raise ValueError("Saved state has a different creation intent; retain it and choose a new private directory")
+        player = cls(state, saved, token=saved.get("token", saved["claim"]))
+        if "token" not in saved:
+            # Admission secrets/replies never pass through the public audit.
+            reply = player.client.request("POST", "/v1/agent/join", {"mode": mode, "intent": "new"})
+            binding = _binding(reply, mode)
+            registration = _registration(reply, binding)
+            if reply.get("api_version") != "v1" or reply.get("token") != saved["claim"]:
+                raise ValueError("Invalid private dynamic registration response")
+            saved = {**saved, "binding": binding, "registration": registration,
+                     "token": saved["claim"], "verified": False}
+            _write_private(state / "session.json", dumps(saved).encode())
+            player = cls(state, saved)
+        player._verify()
+        intent = saved["create_intent"]
+        body = {"request_id": intent["request_id"], "action": {
+            "name": "company.rename", "parameters": {"name": intent["name"]}}}
+        player.actions.save(body)
+        try:
+            # Existing exact-body retries are already idempotent, including a
+            # lost naming reply. Never allocate another setup request ID.
+            receipt = player.retry(intent["request_id"])
+            naming = {"request_id": intent["request_id"], "status": receipt["status"]}
+            result = receipt.get("result")
+            if isinstance(result, dict):
+                if type(result.get("success")) is bool:
+                    naming["success"] = result["success"]
+                if isinstance(result.get("error"), str):
+                    naming["error"] = result["error"][:512]
+        except BackendError as error:
+            naming = {"request_id": intent["request_id"], "status": "unavailable",
+                      "error": {"status": error.status, "code": error.code}}
+        except (OSError, TimeoutError) as error:
+            naming = {"request_id": intent["request_id"], "status": "transport_unknown",
+                      "error": type(error).__name__}
+        player.session["naming"] = naming
+        _write_private(state / "session.json", dumps(player.session).encode())
+        player._setup = player._setup_result("new" if fresh else "recovered_new")
+        return player
+
+    @classmethod
+    def resume(cls, state):
+        """Verify existing company authority, without admission or naming."""
+        state = _private_directory(state, create=False)
+        saved = _session(state)
+        if not isinstance(saved.get("token"), str) or "binding" not in saved:
+            raise ValueError("Creation is incomplete; repeat the exact saved new or legacy join command")
+        _binding(saved["binding"], saved["mode"])
+        player = cls(state, saved)
+        player._verify()
+        player._setup = player._setup_result("resumed")
+        return player
+
+    def _verify(self):
+        saved = self.session
+        me = self.request("GET", "/v1/me")
+        if _binding(me, saved["mode"]) != saved.get("binding") or me.get("kind") != "agent":
+            raise ValueError("Authenticated company does not match the saved binding")
+        if saved["version"] == 2 and _registration(me, saved["binding"]) != saved["registration"]:
+            raise ValueError("Authenticated registration does not match the saved world")
+        saved["verified"] = True
+        _write_private(self.state / "session.json", dumps(saved).encode())
+
+    def _setup_result(self, operation):
+        result = {"operation": operation, "binding": self.binding}
+        if "registration" in self.session:
+            result.update(self.session["registration"])
+        if "naming" in self.session:
+            result["naming"] = self.session["naming"]
+        elif "create_intent" in self.session:
+            result["naming"] = {"request_id": self.session["create_intent"]["request_id"], "status": "not_started"}
+        return deepcopy(result)
+
+    @property
+    def setup(self):
+        """Public setup summary; naming state is advisory, not a new journal."""
+        return self.safe_output(deepcopy(self._setup or self._setup_result("opened")))
+
+    @classmethod
     def open(cls, state):
         state = _private_directory(state)
         saved = _session(state)
         if saved.get("verified") is not True or not isinstance(saved.get("token"), str):
-            raise ValueError("Join is incomplete; run join again with the same origin, mode and private directory")
+            raise ValueError("Setup is incomplete; run resume if a token/binding was saved, otherwise repeat the exact new or legacy join command")
         _binding(saved.get("binding"), saved["mode"])
         return cls(state, saved)
 
@@ -393,6 +532,11 @@ def main(argv=None):
     join = commands.add_parser("join")
     join.add_argument("--origin", required=True)
     join.add_argument("--mode", required=True, choices=("text", "visual"))
+    command = commands.add_parser("new")
+    command.add_argument("--origin", required=True)
+    command.add_argument("--mode", required=True, choices=("text", "visual"))
+    command.add_argument("--name", required=True)
+    commands.add_parser("resume")
     for name in ("get", "post", "put", "delete"):
         command = commands.add_parser(name)
         command.add_argument("path")
@@ -430,7 +574,35 @@ def main(argv=None):
         if name == "ui":
             command.add_argument("--id")
     args = parser.parse_args(argv)
-    if args.command == "join":
+    try:
+        _run(args)
+    except BackendError as error:
+        # The server controls its code as well as its message. Admission can
+        # fail before a player exists, so load only already saved private
+        # state here; do not construct a client or create recovery state.
+        code = str(error.code)
+        try:
+            saved = _session(_private_directory(args.state, create=False))
+            for field in ("claim", "token"):
+                secret = saved.get(field)
+                if isinstance(secret, str) and secret and secret in code:
+                    code = "backend_error"
+                    break
+        except (ValueError, OSError):
+            code = "backend_error"
+        if re.fullmatch(r"[a-z][a-z0-9_]{0,127}", code) is None:
+            code = "backend_error"
+        raise BackendError(error.status, code, "Client request failed") from None
+
+
+def _run(args):
+    if args.command == "new":
+        player = AgentClient.new(args.origin, args.state, args.mode, args.name)
+        result = player.setup
+    elif args.command == "resume":
+        player = AgentClient.resume(args.state)
+        result = player.setup
+    elif args.command == "join":
         player = AgentClient.join(args.origin, args.state, args.mode)
         result = player.binding
     else:

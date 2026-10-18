@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from urllib.parse import unquote
 
 from .capabilities import matrix
+from .admission import DynamicAgentAdmission
 from .catalog import CATALOG, action_spec, query_spec, validate_parameters, verify_engine_capabilities
 from .checkpoint import CheckpointPolicy
 from .errors import ServiceError
@@ -88,6 +89,18 @@ def _stored_native_offset(value):
     return value if value <= _MAX_SQLITE_INT else "u" + str(value)
 
 
+def _internal_fields(payload):
+    """The two private journal operations; public actions cannot select RPCs."""
+    kind = payload.get("rpc_type")
+    if kind == "chat.publish":
+        return kind, {"message": payload["delivery"]}
+    if kind == "company.register":
+        return kind, {"owner": payload["owner"]}
+    if kind is not None:
+        raise ServiceError("invalid_internal_request", status=503)
+    return None, {}
+
+
 class Service:
     """One backend/database/socket per world; a proxy hosts independent stacks."""
 
@@ -145,6 +158,11 @@ class Service:
                 self.world_id = self.store.enforce_single_world(principal.world_id)
             if principal.world_id != self.world_id:
                 raise ServiceError("forbidden", status=403)
+        # Chat, events and images also carry company authority. A numeric ID
+        # reused after deletion must never keep an earlier dynamic bearer alive.
+        registration = self.store.registration_for_run(principal.run_id)
+        if registration is not None:
+            DynamicAgentAdmission.verify_owner(principal, self, registration)
         return principal
 
     def _envelope(self, rpc_type, principal=None, **fields):
@@ -362,6 +380,17 @@ class Service:
         return self.events(token, after)
 
     def handle(self, method, path, token, body=None, query=None):
+        if method == "GET" and path == "/v1/model-reports":
+            if query or body:
+                raise ServiceError("invalid_request")
+            reports = self.store.model_reports_for_world(self.world_id)
+            hidden = self.admission.unclaimed_runs() if self.admission else set()
+            return 200, {"participants": [
+                {"company_id": member.company_id, "model_report": reports[member.run_id]}
+                for member in self.store.principals_for_world(self.world_id)
+                if member.kind == "agent" and member.mode in ("text", "visual")
+                and member.run_id not in hidden and member.run_id in reports
+            ]}
         if method == "POST" and path == "/v1/agent/join":
             if query:
                 raise ServiceError("invalid_request")
@@ -378,6 +407,9 @@ class Service:
             result = {"identity_id": principal.identity_id, "world_id": principal.world_id,
                       "company_id": principal.company_id, "run_id": principal.run_id,
                       "mode": principal.mode, "kind": principal.kind, "display_name": principal.display_name}
+            registration = self.store.registration_for_run(principal.run_id)
+            if registration is not None:
+                result.update(world_epoch=registration["world_epoch"], registration_id=registration["run_id"])
             report = self.store.model_reports_for_world(principal.world_id).get(principal.run_id)
             if report is not None:
                 result["model_report"] = report
@@ -481,9 +513,11 @@ class Service:
                                            ["view", "observe", "native-info"]):
             if query:
                 raise ServiceError("invalid_request")
-            if not self.renderer or not self.renderer.available(principal):
+            if not self.renderer:
                 raise ServiceError("renderer_unavailable", status=503)
             self._configure_renderer(principal)
+            if not self.renderer.available(principal):
+                raise ServiceError("renderer_unavailable", status=503)
             kind = "world" if route[-1] == "world" else "native_info"
             value = self.renderer.observe(
                 principal, kind, body,
@@ -634,6 +668,9 @@ class Service:
         hello = self._hello(principal)
         if "native_max_lag_ticks" in hello:
             self.renderer.configure_authority(hello["engine_instance_id"], hello["native_max_lag_ticks"])
+        registration = self.store.registration_for_run(principal.run_id)
+        if registration is not None and registration["ready"] and principal.mode == "visual":
+            DynamicAgentAdmission.repair_worker(registration, self, hello)
 
     def _observation_barrier(self, principal, request_id):
         """Resolve a private applied-frame fence without changing a saved action.
@@ -865,6 +902,8 @@ class Service:
                     break
             if not groups or budget == 0 or self._stop.is_set():
                 break
+        if self.admission and hasattr(self.admission, "advance"):
+            self.admission.advance(self, hello)
         prefix = self.store.checkpoint_ack_prefix(world_id)
         if prefix > self._last_ack:
             acknowledged = self._rpc("action.ack", through_sequence=prefix, engine_instance_id=hello["engine_instance_id"])
@@ -991,8 +1030,8 @@ class Service:
                     continue  # Proven local cancellation, never sent to authority.
                 actor = self.store.get_principal(record["run_id"])
                 payload = record["payload"]
-                internal = payload.get("rpc_type") == "chat.publish"
-                fields = {"message": payload["delivery"], "request_type": "chat.publish"} if internal else dict(payload)
+                internal, internal_fields = _internal_fields(payload)
+                fields = dict(internal_fields, request_type=internal) if internal else dict(payload)
                 if self._ui_actuation(record):
                     if record.get("intent_state") != "persisted" or not record.get("visual_intent"):
                         self.store.mark_intent_uncertain(actor, record["request_id"])
@@ -1073,11 +1112,11 @@ class Service:
                 if record["status"] not in _TERMINAL or record["checkpoint_state"] == "checkpointed":
                     continue
                 actor = self.store.get_principal(record["run_id"])
-                internal = record["payload"].get("rpc_type") == "chat.publish"
+                internal, internal_fields = _internal_fields(record["payload"])
                 fields = {"request_sequence": after, "request_id": record["request_id"],
                           "engine_instance_id": hello["engine_instance_id"]}
                 if internal:
-                    fields.update(request_type="chat.publish", message=record["payload"]["delivery"])
+                    fields.update(request_type=internal, **internal_fields)
                 else:
                     self._bind(actor, hello)
                     if self._ui_actuation(record):
@@ -1105,7 +1144,7 @@ class Service:
             status = "rejected" if record["status"] == "accepted" else "uncertain"
             return self.store.update_request(principal, request_id, status, error={"code": "authorization_revoked"})
         hello = hello or self._hello(principal, refresh=True)
-        internal = record["payload"].get("rpc_type") == "chat.publish"
+        internal, internal_fields = _internal_fields(record["payload"])
         if not internal:
             self._bind(principal, hello)
         instance = hello["engine_instance_id"]
@@ -1121,6 +1160,7 @@ class Service:
                 if record["status"] != "accepted" or record["payload"]["action"]["name"] != "ui.apply" or not self.renderer:
                     return self.store.mark_intent_uncertain(principal, request_id,
                         event={"request_id": request_id, "status": "uncertain"})
+                self._configure_renderer(principal)
                 expected_worker = self.renderer.prepare_intent(principal, instance, hello["native_max_lag_ticks"])
                 self.store.begin_intent_capture(principal, request_id, expected_worker)
                 try:
@@ -1142,7 +1182,7 @@ class Service:
             self.store.update_request(principal, request_id, "queued", result={"engine_instance_id": instance})
             try:
                 if internal:
-                    reply = self._rpc("chat.publish", **fields, message=record["payload"]["delivery"])
+                    reply = self._rpc(internal, **fields, **internal_fields)
                 else:
                     reply = self._rpc("action.submit", principal, **fields, **record["payload"],
                                       payload_sha256=hashlib.sha256(dumps(record["payload"]).encode()).hexdigest())
@@ -1153,8 +1193,7 @@ class Service:
             if old_instance and old_instance != instance:
                 return self._record_result(principal, record, {"status": "uncertain"})
             if internal:
-                fields["request_type"] = "chat.publish"
-                fields["message"] = record["payload"]["delivery"]
+                fields.update(request_type=internal, **internal_fields)
             elif ui_actuation:
                 fields.update(record["payload"])
             reply = self._rpc("action.status", None if internal else principal, **fields)
@@ -1189,7 +1228,7 @@ class Service:
                 value["checkpoint_state"] = "checkpointed"
                 if principal.mode != "internal":
                     self.store.append_event(principal, "action.status", self.project_action(principal, value))
-        if principal.mode == "internal":
+        if principal.mode == "internal" and record["payload"].get("rpc_type") == "chat.publish":
             message_id = record["payload"]["message_id"]
             if reply["status"] == "completed":
                 self.social.mark_delivered(message_id, tick=reply.get("tick"))
