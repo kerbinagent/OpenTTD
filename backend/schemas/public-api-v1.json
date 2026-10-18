@@ -1095,9 +1095,116 @@
       ],
       "additionalProperties": false
     },
+    "selectedObservationsCapability": {
+      "type": "object",
+      "description": "Versioned selected native observation interface. Images carry no input lease or structured world state.",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "image_purpose": {
+          "const": "observation"
+        },
+        "endpoint_world": {
+          "const": "/v1/view/observe/world"
+        },
+        "endpoint_native_info": {
+          "const": "/v1/view/observe/native-info"
+        },
+        "observation_generation": {
+          "$ref": "#/$defs/observationGeneration"
+        },
+        "retry_retention_ms": {
+          "const": 60000
+        },
+        "future_clock_skew_ms": {
+          "const": 5000
+        },
+        "request_identity": {
+          "const": {
+            "pattern": "^obs1:([0-9]{13}):([0-9a-f]{32})$"
+          }
+        },
+        "limits": {
+          "const": {
+            "max_requests": 64,
+            "max_wait_ms": 2000,
+            "default_wait_ms": 1500,
+            "min_width": 64,
+            "max_width": 1280,
+            "min_height": 64,
+            "max_height": 1024,
+            "max_pixels": 1048576,
+            "max_native_virtual_pixels": 134217728
+          }
+        },
+        "zoom_levels": {
+          "const": [
+            "in4x",
+            "in2x",
+            "normal",
+            "out2x",
+            "out4x",
+            "out8x"
+          ]
+        },
+        "label_defaults": {
+          "const": {
+            "town_names": true,
+            "station_names": true,
+            "waypoint_names": false,
+            "signs": false,
+            "competitor_labels": false
+          }
+        },
+        "panels": {
+          "const": {
+            "company_finances": {
+              "target": {
+                "kind": "self"
+              },
+              "presentation": {
+                "layout": "expanded"
+              },
+              "region": "window"
+            },
+            "town_directory": {
+              "presentation": {
+                "sort": {
+                  "by": "name",
+                  "direction": "ascending"
+                },
+                "scroll": {
+                  "first_row": 0
+                }
+              },
+              "region": "window"
+            }
+          }
+        }
+      },
+      "required": [
+        "version",
+        "image_purpose",
+        "endpoint_world",
+        "endpoint_native_info",
+        "observation_generation",
+        "retry_retention_ms",
+        "future_clock_skew_ms",
+        "request_identity",
+        "limits",
+        "zoom_levels",
+        "label_defaults",
+        "panels"
+      ],
+      "additionalProperties": false
+    },
     "capabilitiesResponse": {
       "type": "object",
       "properties": {
+        "selected_observations": {
+          "$ref": "#/$defs/selectedObservationsCapability"
+        },
         "api_version": {
           "const": "v1"
         },
@@ -2157,6 +2264,331 @@
         }
       ],
       "description": "HTTP 200 direct actuator reference/token response, without a wrapper. Missing/ambiguous/unauthorized targets and the shared expensive-work admission limit use HTTP 409 control_reference_unavailable; retry with backoff. No attributes, lists or counts."
+    },
+    "observationGeneration": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "observationRequestId": {
+      "type": "string",
+      "pattern": "^obs1:[0-9]{13}:[0-9a-f]{32}$"
+    },
+    "ObserveWorldRequest": {
+      "type": "object",
+      "properties": {
+        "observation_generation": {
+          "$ref": "#/$defs/observationGeneration"
+        },
+        "observation_request_id": {
+          "$ref": "#/$defs/observationRequestId"
+        },
+        "after_request_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "wait_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2000,
+          "default": 1500
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "map_center"
+                },
+                "tile": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 65535
+                    },
+                    "y": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 65535
+                    }
+                  },
+                  "required": [
+                    "x",
+                    "y"
+                  ],
+                  "additionalProperties": false
+                },
+                "zoom_level": {
+                  "type": "string",
+                  "enum": [
+                    "in4x",
+                    "in2x",
+                    "normal",
+                    "out2x",
+                    "out4x",
+                    "out8x"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "tile",
+                "zoom_level"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "map_image_point"
+                },
+                "observation_id": {
+                  "$ref": "#/$defs/imageId"
+                },
+                "pixel": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1279
+                    },
+                    "y": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1023
+                    }
+                  },
+                  "required": [
+                    "x",
+                    "y"
+                  ],
+                  "additionalProperties": false
+                },
+                "zoom_level": {
+                  "type": "string",
+                  "enum": [
+                    "in4x",
+                    "in2x",
+                    "normal",
+                    "out2x",
+                    "out4x",
+                    "out8x"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "observation_id",
+                "pixel",
+                "zoom_level"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "width": {
+              "type": "integer",
+              "minimum": 64,
+              "maximum": 1280
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 64,
+              "maximum": 1024
+            }
+          },
+          "required": [
+            "width",
+            "height"
+          ],
+          "additionalProperties": false,
+          "description": "Runtime also requires width * height <= 1048576 and width * height * 4^zoom_index <= 134217728. zoom_index is the zero-based index in [in4x, in2x, normal, out2x, out4x, out8x]."
+        },
+        "labels": {
+          "type": "object",
+          "properties": {
+            "town_names": {
+              "type": "boolean",
+              "default": true
+            },
+            "station_names": {
+              "type": "boolean",
+              "default": true
+            },
+            "waypoint_names": {
+              "type": "boolean",
+              "default": false
+            },
+            "signs": {
+              "type": "boolean",
+              "default": false
+            },
+            "competitor_labels": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "observation_generation",
+        "observation_request_id",
+        "selection",
+        "output"
+      ],
+      "additionalProperties": false,
+      "description": "Closed POST /v1/view/observe/world request. Output pixel and zoom-dependent work caps are enforced at runtime in addition to these structural constraints."
+    },
+    "ObserveNativeInfoRequest": {
+      "description": "Closed POST /v1/view/observe/native-info request. Company finances accepts only the authenticated company; town directory has no target.",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "observation_generation": {
+              "$ref": "#/$defs/observationGeneration"
+            },
+            "observation_request_id": {
+              "$ref": "#/$defs/observationRequestId"
+            },
+            "after_request_id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "wait_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2000,
+              "default": 1500
+            },
+            "panel": {
+              "const": "company_finances"
+            },
+            "target": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "self"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false,
+              "default": {
+                "kind": "self"
+              },
+              "description": "Omitting target normalizes to the authenticated company (self)."
+            },
+            "presentation": {
+              "type": "object",
+              "properties": {
+                "layout": {
+                  "type": "string",
+                  "enum": [
+                    "compact",
+                    "expanded"
+                  ],
+                  "default": "expanded"
+                }
+              },
+              "additionalProperties": false
+            },
+            "region": {
+              "type": "string",
+              "const": "window",
+              "default": "window"
+            }
+          },
+          "required": [
+            "observation_generation",
+            "observation_request_id",
+            "panel"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "observation_generation": {
+              "$ref": "#/$defs/observationGeneration"
+            },
+            "observation_request_id": {
+              "$ref": "#/$defs/observationRequestId"
+            },
+            "after_request_id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "wait_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2000,
+              "default": 1500
+            },
+            "panel": {
+              "const": "town_directory"
+            },
+            "presentation": {
+              "type": "object",
+              "properties": {
+                "sort": {
+                  "type": "object",
+                  "properties": {
+                    "by": {
+                      "type": "string",
+                      "enum": [
+                        "name",
+                        "population",
+                        "rating"
+                      ],
+                      "default": "name"
+                    },
+                    "direction": {
+                      "type": "string",
+                      "enum": [
+                        "ascending",
+                        "descending"
+                      ],
+                      "default": "ascending"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "scroll": {
+                  "type": "object",
+                  "properties": {
+                    "first_row": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 65535,
+                      "default": 0
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            },
+            "region": {
+              "type": "string",
+              "const": "window",
+              "default": "window"
+            }
+          },
+          "required": [
+            "observation_generation",
+            "observation_request_id",
+            "panel"
+          ],
+          "additionalProperties": false
+        }
+      ]
     }
   }
 }

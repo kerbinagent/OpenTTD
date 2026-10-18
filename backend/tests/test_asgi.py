@@ -1,10 +1,14 @@
 """ASGI transport tests; automatically skipped without optional ASGI deps."""
 
 import asyncio
+from dataclasses import replace
 import json
+import struct
 import threading
 import time
 import unittest
+from urllib.parse import unquote
+import zlib
 
 try:
     from backend import asgi
@@ -12,8 +16,31 @@ except ImportError:
     asgi = None
 
 from backend.errors import ServiceError
+from backend.observations import ObservationImage
 from backend.service import Service
 from backend.store import Store
+
+
+def observation_image(**changes):
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data +
+                struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
+
+    data = (b"\x89PNG\r\n\x1a\n" +
+            chunk(b"IHDR", struct.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 0)) +
+            chunk(b"IDAT", zlib.compress((b"\0" + b"\0" * (3 * 64)) * 64)) + chunk(b"IEND", b""))
+    return replace(ObservationImage(data, "a" * 32, "b" * 32, "c" * 32, "world",
+                                    64, 64, "none", False, 0), **changes)
+
+
+class ObservationService:
+    def __init__(self, payload, status=200):
+        self.payload, self.status = payload, status
+
+    def handle(self, method, path, token, body=None, query=None):
+        if token != "secret":
+            raise ServiceError("unauthorized", status=401)
+        return self.status, self.payload
 
 
 class StubService:
@@ -146,6 +173,69 @@ class ASGITransportTests(unittest.IsolatedAsyncioTestCase):
         finally:
             asgi.STREAM_LIFETIME = previous
 
+    async def test_selected_observation_is_finite_png_with_only_public_metadata(self):
+        for kind, path in (("world", "/v1/view/observe/world"),
+                           ("native_info", "/v1/view/observe/native-info")):
+            with self.subTest(kind=kind):
+                image = observation_image(kind=kind, causal_state="satisfied", reused=True, age_ms=12)
+                object.__setattr__(image, "source_frame", 123)
+                object.__setattr__(image, "private_path", "/private/artifact.png")
+                app = asgi.create_app(ObservationService(image))
+                status, body, headers = await call(app, path, method="POST", body=b"{}",
+                                                  headers=((b"range", b"bytes=0-2"),))
+                self.assertEqual((status, body), (200, image.data))
+                self.assertEqual(headers[b"content-type"], b"image/png")
+                self.assertEqual(headers[b"content-length"], str(len(image.data)).encode())
+                self.assertEqual(headers[b"cache-control"], b"no-store")
+                self.assertEqual(headers[b"x-content-type-options"], b"nosniff")
+                self.assertEqual(headers[b"referrer-policy"], b"no-referrer")
+                self.assertEqual({key: value for key, value in headers.items() if key.startswith(b"x-openttd-")}, {
+                    b"x-openttd-observation-id": b"a" * 32,
+                    b"x-openttd-image-id": b"b" * 32,
+                    b"x-openttd-observation-generation": b"c" * 32,
+                    b"x-openttd-capture-kind": kind.encode(),
+                    b"x-openttd-image-width": b"64", b"x-openttd-image-height": b"64",
+                    b"x-openttd-causal-state": b"satisfied", b"x-openttd-image-reused": b"true",
+                    b"x-openttd-image-age-ms": b"12", b"x-openttd-image-purpose": b"observation",
+                })
+                self.assertNotIn(b"etag", headers)
+                self.assertNotIn(b"accept-ranges", headers)
+                self.assertEqual(app.state.capture_slots.active, 0)
+                status, _, _ = await call(app, path, method="POST", body=b"{}", token="bad")
+                self.assertEqual(status, 401)
+
+    async def test_selected_observation_pending_stays_finite_json(self):
+        pending = {"status": "pending", "observation_request_id": "obs1:1234567890000:" + "a" * 32}
+        app = asgi.create_app(ObservationService(pending, status=202))
+        status, body, headers = await call(app, "/v1/view/observe/world", method="POST", body=b"{}")
+        self.assertEqual((status, json.loads(body)), (202, pending))
+        self.assertEqual(headers[b"content-type"], b"application/json; charset=utf-8")
+        self.assertFalse(any(key.startswith(b"x-openttd-") for key in headers))
+
+    async def test_invalid_selected_observation_never_commits_png_headers(self):
+        valid = observation_image()
+        private = b"private-path\0/artifacts/image.png"
+        metadata_png = (valid.data[:-12] + struct.pack(">I", len(private)) + b"tEXt" + private +
+                        struct.pack(">I", zlib.crc32(b"tEXt" + private) & 0xffffffff) + valid.data[-12:])
+        cases = (
+            {"observation_id": "a" * 32 + "\r\nPrivate: path"}, {"image_id": "bad"},
+            {"generation": "A" * 32}, {"kind": "native_info"}, {"width": True},
+            {"width": 63}, {"width": 1281}, {"height": 1025}, {"height": 65},
+            {"causal_state": "private"}, {"reused": 1}, {"age_ms": -1}, {"age_ms": 65001},
+            {"age_ms": float("nan")}, {"data": b"\x89PNG\r\n\x1a\ninvalid"},
+            {"data": valid.data[:-1]}, {"data": metadata_png}, {"data": b"x" * (asgi.MAX_IMAGE + 1)},
+        )
+        for changes in cases:
+            with self.subTest(changes=list(changes)):
+                app = asgi.create_app(ObservationService(replace(valid, **changes)))
+                status, body, headers = await call(app, "/v1/view/observe/world", method="POST", body=b"{}")
+                self.assertEqual(status, 500)
+                self.assertEqual(json.loads(body)["error"]["code"], "image_unavailable")
+                self.assertEqual(headers[b"content-type"], b"application/json; charset=utf-8")
+                self.assertFalse(any(key.startswith(b"x-openttd-") for key in headers))
+                self.assertNotIn(b"Private", body)
+                self.assertEqual(app.state.capture_slots.active, 0)
+
     async def test_cached_image_burst_admits_54_and_503_at_65(self):
         calls = []
         call_lock = threading.Lock()
@@ -272,18 +362,19 @@ class ASGITransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.state.image_slots.active, 0)
         self.assertEqual(app.state.image_lookup_threads.borrowed_tokens, 0)
 
-    async def test_sixty_four_api_slots_keep_acknowledgements_moving_during_capture_burst(self):
+    async def test_eight_capture_slots_preserve_actions_chat_images_and_events(self):
         started = 0
         lock = threading.Lock()
-        release = threading.Semaphore(0)
+        release = threading.Event()
+        capture_paths = ("/v1/view/images", "/v1/view/observe/world", "/v1/view/observe/native-info")
 
         class BlockingCaptures(StubService):
             def handle(self, method, path, token, body=None, query=None):
                 nonlocal started
-                if method == "POST" and path == "/v1/view/images":
+                if method == "POST" and path in capture_paths:
                     with lock:
                         started += 1
-                    if not release.acquire(timeout=10):
+                    if not release.wait(timeout=10):
                         raise RuntimeError("capture gate timed out")
                 return super().handle(method, path, token, body, query)
 
@@ -298,12 +389,14 @@ class ASGITransportTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.01)
             self.fail(f"only {current} capture workers entered; expected {count}")
 
-        captures = [asyncio.create_task(call(app, "/v1/view/images", method="POST", body=b"{}"))
-                    for _ in range(54)]
+        captures = [asyncio.create_task(call(app, capture_paths[index % 3], method="POST", body=b"{}"))
+                    for index in range(8)]
         try:
-            await wait_for_captures(54)
-            self.assertEqual(app.state.api_slots.active, 54)
-            self.assertEqual(app.state.api_threads.borrowed_tokens, 54)
+            await wait_for_captures(8)
+            self.assertEqual(app.state.capture_slots.active, 8)
+            self.assertEqual(app.state.capture_threads.borrowed_tokens, 8)
+            self.assertEqual(app.state.api_slots.active, 0)
+            self.assertEqual(app.state.api_threads.borrowed_tokens, 0)
             for method, path, body in (
                 ("POST", "/v1/actions", b'{"request_id":"a"}'),
                 ("POST", "/v1/threads/t/messages", b'{"body":"hello"}'),
@@ -321,29 +414,162 @@ class ASGITransportTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(stream_status, 200)
             finally:
                 asgi.STREAM_LIFETIME = previous
-            captures.extend(asyncio.create_task(call(app, "/v1/view/images", method="POST", body=b"{}"))
-                            for _ in range(10))
-            await wait_for_captures(64)
-            self.assertEqual(app.state.api_slots.active, 64)
-            self.assertEqual(app.state.api_threads.borrowed_tokens, 64)
-            status, body, _ = await call(app, "/v1/actions", method="POST", body=b"{}")
-            self.assertEqual(status, 503)
-            self.assertEqual(json.loads(body)["error"]["code"], "server_busy")
-            release.release()
-            for _ in range(200):
-                if app.state.api_slots.active == 63:
-                    break
-                await asyncio.sleep(0.01)
-            self.assertEqual(app.state.api_slots.active, 63)
+            for path in capture_paths:
+                status, body, _ = await call(app, path, method="POST", body=b"{}")
+                self.assertEqual(status, 503)
+                self.assertEqual(json.loads(body)["error"]["code"], "captures_busy")
+            self.assertEqual(started, 8)
             status, _, _ = await call(app, "/v1/actions", method="POST", body=b"{}")
             self.assertEqual(status, 200)
         finally:
-            for _ in range(64):
-                release.release()
+            release.set()
             results = await asyncio.gather(*captures)
         self.assertTrue(all(status == 200 for status, _, _ in results))
         self.assertEqual(app.state.api_slots.active, 0)
         self.assertEqual(app.state.api_threads.borrowed_tokens, 0)
+        self.assertEqual(app.state.capture_slots.active, 0)
+        self.assertEqual(app.state.capture_threads.borrowed_tokens, 0)
+
+    async def test_capture_admission_is_held_through_send_and_released_on_timeout_or_cancel(self):
+        app = asgi.create_app(ObservationService(observation_image()))
+        gate = asyncio.Event()
+        bodies_started = 0
+
+        def on_body():
+            nonlocal bodies_started
+            bodies_started += 1
+
+        tasks = [asyncio.create_task(call(app, "/v1/view/observe/world", method="POST", body=b"{}",
+                                          body_gate=gate, on_body=on_body)) for _ in range(8)]
+        try:
+            for _ in range(200):
+                if bodies_started == 8:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(bodies_started, 8)
+            self.assertEqual(app.state.capture_slots.active, 8)
+            self.assertEqual(app.state.capture_threads.borrowed_tokens, 0)
+            status, body, _ = await call(app, "/v1/view/images", method="POST", body=b"{}")
+            self.assertEqual((status, json.loads(body)["error"]["code"]), (503, "captures_busy"))
+            tasks[-1].cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await tasks[-1]
+            self.assertEqual(app.state.capture_slots.active, 7)
+        finally:
+            gate.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.assertEqual(app.state.capture_slots.active, 0)
+        previous = asgi.SEND_TIMEOUT
+        asgi.SEND_TIMEOUT = 0.05
+        try:
+            status, _, _ = await call(app, "/v1/view/observe/world", method="POST", body=b"{}", slow_send=True)
+            self.assertEqual(status, 200)
+            self.assertEqual(app.state.capture_slots.active, 0)
+        finally:
+            asgi.SEND_TIMEOUT = previous
+
+    async def test_encoded_and_slash_capture_routes_share_the_generation_budget(self):
+        release = threading.Event()
+        started = 0
+        lock = threading.Lock()
+
+        class DomainRoutingCaptures(StubService):
+            def handle(self, method, path, token, body=None, query=None):
+                nonlocal started
+                parts = [unquote(part) for part in path.strip("/").split("/")]
+                if method == "POST" and parts == ["v1", "view", "images"]:
+                    with lock:
+                        started += 1
+                    if not release.wait(5):
+                        raise RuntimeError("capture gate timed out")
+                return super().handle(method, path, token, body, query)
+
+        app = asgi.create_app(DomainRoutingCaptures())
+        tasks = [asyncio.create_task(call(app, "/v1/view/%69mages", method="POST", body=b"{}"))
+                 for _ in range(8)]
+        try:
+            for _ in range(200):
+                with lock:
+                    count = started
+                if count == 8:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(count, 8)
+            self.assertEqual(app.state.capture_slots.active, 8)
+            self.assertEqual(app.state.capture_threads.borrowed_tokens, 8)
+            self.assertEqual(app.state.api_slots.active, 0)
+            self.assertEqual(app.state.api_threads.borrowed_tokens, 0)
+            for path in ("/v1/view/images", "/v1/view/%69mages", "/v1/view/images/",
+                         "//v1/view/images//", "/%761/view/images",
+                         "/v1/view/%6fbserve/world", "/v1/view/observe/world/",
+                         "//v1/view/observe/world//", "/v1/view/%6fbserve/native-info",
+                         "/v1/view/observe/native-info/", "//v1/view/observe/native-info//"):
+                with self.subTest(path=path):
+                    status, body, _ = await call(app, path, method="POST", body=b"{}")
+                    self.assertEqual((status, json.loads(body)["error"]["code"]), (503, "captures_busy"))
+            status, _, _ = await call(app, "/v1/actions", method="POST", body=b"{}")
+            self.assertEqual(status, 200)
+            self.assertEqual(started, 8)
+        finally:
+            release.set()
+            results = await asyncio.gather(*tasks)
+        self.assertTrue(all(status == 200 for status, _, _ in results))
+        self.assertEqual(app.state.capture_slots.active, 0)
+        self.assertEqual(app.state.capture_threads.borrowed_tokens, 0)
+
+    async def test_selected_observation_alternate_spellings_return_png(self):
+        for kind, path in (("world", "/v1/view/%6fbserve/world/"),
+                           ("native_info", "//v1/view/observe/native-info//")):
+            with self.subTest(path=path):
+                image = observation_image(kind=kind)
+                app = asgi.create_app(ObservationService(image))
+                status, body, headers = await call(app, path, method="POST", body=b"{}")
+                self.assertEqual((status, body), (200, image.data))
+                self.assertEqual(headers[b"x-openttd-capture-kind"], kind.encode())
+                self.assertEqual(app.state.capture_slots.active, 0)
+
+    async def test_cancelled_capture_workers_keep_the_generation_budget_until_they_finish(self):
+        release = threading.Event()
+        started = 0
+        lock = threading.Lock()
+
+        class BlockingCaptures(StubService):
+            def handle(self, *args):
+                nonlocal started
+                with lock:
+                    started += 1
+                if not release.wait(5):
+                    raise RuntimeError("capture gate timed out")
+                return super().handle(*args)
+
+        app = asgi.create_app(BlockingCaptures())
+        tasks = [asyncio.create_task(call(app, "/v1/view/images", method="POST", body=b"{}"))
+                 for _ in range(8)]
+        try:
+            for _ in range(200):
+                with lock:
+                    count = started
+                if count == 8:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(count, 8)
+            for task in tasks:
+                task.cancel()
+            await asyncio.sleep(0.02)
+            for task in tasks:
+                task.cancel()
+            await asyncio.sleep(0.02)
+            self.assertEqual(app.state.capture_slots.active, 8)
+            self.assertEqual(app.state.capture_threads.borrowed_tokens, 8)
+            status, body, _ = await call(app, "/v1/view/observe/world", method="POST", body=b"{}")
+            self.assertEqual((status, json.loads(body)["error"]["code"]), (503, "captures_busy"))
+            self.assertEqual(started, 8)
+        finally:
+            release.set()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        self.assertTrue(all(isinstance(result, asyncio.CancelledError) for result in results))
+        self.assertEqual(app.state.capture_slots.active, 0)
+        self.assertEqual(app.state.capture_threads.borrowed_tokens, 0)
 
     async def test_sixty_four_streams_wake_on_persisted_event(self):
         store = Store(":memory:")

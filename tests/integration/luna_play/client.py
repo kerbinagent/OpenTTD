@@ -18,6 +18,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 from backend.client import BackendClient, BackendError, credential_from_env_or_file
+from backend.player_actions import SavedActions
 
 IDENTIFIER = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 TERMINAL = {"completed", "rejected", "uncertain", "retired", "resolved_rolled_back"}
@@ -29,6 +30,7 @@ class PlayerClient:
         self.artifacts = artifacts.resolve()
         for directory in (self.artifacts, self.artifacts / "requests", self.artifacts / "images"):
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.actions = SavedActions(self.artifacts / "requests")
 
     def record(self, value):
         with (self.artifacts / "public-io.jsonl").open("a", encoding="utf-8") as target:
@@ -50,15 +52,11 @@ class PlayerClient:
         return reply
 
     def issue(self, body):
+        fresh = self.actions.save(body)
         request_id = body["request_id"]
-        if not isinstance(request_id, str) or not IDENTIFIER.fullmatch(request_id):
-            raise ValueError("Invalid request ID")
-        path = self.artifacts / "requests" / (request_id + ".json")
-        if path.exists():
-            if json.loads(path.read_text()) != body:
-                raise ValueError("Request ID already has a different saved body")
-        else:
-            path.write_text(json.dumps(body, indent=2) + "\n")
+        body = self.actions.load(request_id)
+        self.record({"submission": {"request_id": request_id,
+                                    "kind": "new_intent" if fresh else "exact_replay"}})
         reply = self.request("POST", "/v1/actions", body)
         deadline = time.monotonic() + 20
         while reply["status"] not in TERMINAL:
@@ -67,6 +65,10 @@ class PlayerClient:
             time.sleep(0.1)
             reply = self.request("GET", "/v1/actions/" + request_id)
         return reply
+
+    def retry(self, request_id):
+        """Recover the saved intent; a completed receipt describes that original action."""
+        return self.issue(self.actions.load(request_id))
 
     def capture(self, label):
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", label):
@@ -148,7 +150,7 @@ def main():
         if not IDENTIFIER.fullmatch(args.request_id):
             raise ValueError("Invalid request ID")
         result = (player.request("GET", "/v1/actions/" + args.request_id) if args.command == "status"
-                  else player.issue(json.loads((player.artifacts / "requests" / (args.request_id + ".json")).read_text())))
+                  else player.retry(args.request_id))
     elif args.command == "capture":
         result = player.capture(args.label)
     elif args.command in ("ui", "control"):

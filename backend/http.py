@@ -13,12 +13,15 @@ import socket
 import stat
 import threading
 import time
+import zlib
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from .errors import ServiceError
+from .observations import FUTURE_SKEW_MS, RETENTION_MS, ObservationImage
+from .renderer import _png_dimensions
 
 
 MAX_BODY = 64 * 1024
@@ -27,6 +30,7 @@ MAX_STATIC = 256 * 1024
 MAX_TARGET = 8192
 MAX_HANDLERS = 96
 MAX_STREAMS = 64
+CAPTURE_SLOTS = 8
 SOCKET_TIMEOUT = 10.0
 STREAM_LIFETIME = 60.0
 POLL_INTERVAL = 1.0
@@ -35,6 +39,13 @@ _BEARER = re.compile(r"Bearer ([^\s,]+)\Z", re.IGNORECASE)
 _EVENT_FIELD = re.compile(r"[A-Za-z0-9_.-]+\Z")
 _IMAGE_PATH = re.compile(r"/v1/images/([A-Za-z0-9_-]{1,128})\Z")
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_OBSERVATION_ID = re.compile(r"[0-9a-f]{32}\Z")
+_OBSERVATION_PATHS = {
+    "/v1/view/observe/world": "world",
+    "/v1/view/observe/native-info": "native_info",
+}
+_CAPTURE_PATHS = frozenset({"/v1/view/images", *_OBSERVATION_PATHS})
+_CAPTURE_ROUTES = {tuple(path.strip("/").split("/")): path for path in _CAPTURE_PATHS}
 _WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 _STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -66,6 +77,12 @@ def _reject_constant(value: str) -> None:
     raise ValueError("non-finite JSON number")
 
 
+def _capture_path(path: str) -> str | None:
+    """Classify exactly the component spellings accepted by Service.handle."""
+    parts = tuple(unquote(part) for part in path.strip("/").split("/"))
+    return _CAPTURE_ROUTES.get(parts)
+
+
 def read_static(path: str, root: Path | None = None) -> tuple[bytes, str]:
     """Read one exact viewer asset through a directory descriptor."""
     filename, content_type = _STATIC[path]
@@ -88,6 +105,47 @@ def read_static(path: str, root: Path | None = None) -> tuple[bytes, str]:
     return data, content_type
 
 
+def _observation_headers(image: ObservationImage, path: str) -> dict[str, str]:
+    """Validate a finite selected PNG and project only public response metadata."""
+    if (type(image) is not ObservationImage or image.kind != _OBSERVATION_PATHS.get(path) or
+            any(not isinstance(value, str) or _OBSERVATION_ID.fullmatch(value) is None
+                for value in (image.observation_id, image.image_id, image.generation)) or
+            type(image.width) is not int or not 1 <= image.width <= 1_280 or
+            type(image.height) is not int or not 1 <= image.height <= 1_024 or
+            image.width * image.height > 1_048_576 or
+            image.kind == "world" and (image.width < 64 or image.height < 64) or
+            image.causal_state not in ("none", "satisfied") or type(image.reused) is not bool or
+            type(image.age_ms) is not int or not 0 <= image.age_ms <= RETENTION_MS + FUTURE_SKEW_MS):
+        raise ValueError("Invalid observation image")
+    if not isinstance(image.data, bytes) or len(image.data) > MAX_IMAGE:
+        raise ValueError("Invalid observation PNG")
+    # Reject a mismatched IHDR before the full validator inflates pixels. The
+    # selected-image metadata limit also bounds decompression to 1,048,576 pixels.
+    if (len(image.data) < 33 or not image.data.startswith(_PNG_SIGNATURE) or
+            image.data[8:16] != b"\x00\x00\x00\rIHDR" or
+            (int.from_bytes(image.data[16:20], "big"), int.from_bytes(image.data[20:24], "big")) !=
+            (image.width, image.height)):
+        raise ValueError("Invalid observation PNG dimensions")
+    try:
+        dimensions = _png_dimensions(image.data)
+    except zlib.error:
+        raise ValueError("Invalid observation PNG") from None
+    if dimensions != (image.width, image.height):
+        raise ValueError("Invalid observation PNG")
+    return {
+        "X-OpenTTD-Observation-Id": image.observation_id,
+        "X-OpenTTD-Image-Id": image.image_id,
+        "X-OpenTTD-Observation-Generation": image.generation,
+        "X-OpenTTD-Capture-Kind": image.kind,
+        "X-OpenTTD-Image-Width": str(image.width),
+        "X-OpenTTD-Image-Height": str(image.height),
+        "X-OpenTTD-Causal-State": image.causal_state,
+        "X-OpenTTD-Image-Reused": "true" if image.reused else "false",
+        "X-OpenTTD-Image-Age-Ms": str(image.age_ms),
+        "X-OpenTTD-Image-Purpose": "observation",
+    }
+
+
 class BackendHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
@@ -98,6 +156,7 @@ class BackendHTTPServer(ThreadingHTTPServer):
         self.service = service
         self._handler_slots = threading.BoundedSemaphore(MAX_HANDLERS)
         self.stream_slots = threading.BoundedSemaphore(MAX_STREAMS)
+        self.capture_slots = threading.BoundedSemaphore(CAPTURE_SLOTS)
         super().__init__(address, BackendHandler)
 
     def process_request(self, request: socket.socket, client_address: tuple) -> None:
@@ -178,7 +237,8 @@ class BackendHandler(BaseHTTPRequestHandler):
     def _error(self, status: int, code: str, message: str) -> None:
         self._json_response(status, {"error": {"code": code, "message": message}})
 
-    def _bytes_response(self, status: int, data: bytes, content_type: str, cache_control: str) -> None:
+    def _bytes_response(self, status: int, data: bytes, content_type: str, cache_control: str,
+                        headers: dict[str, str] | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", cache_control)
@@ -186,6 +246,8 @@ class BackendHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
         self.close_connection = True
@@ -251,6 +313,7 @@ class BackendHandler(BaseHTTPRequestHandler):
         return result
 
     def _dispatch(self, method: str) -> None:
+        capture_admitted = False
         try:
             if len(self.path) > MAX_TARGET:
                 raise _RequestError(414, "uri_too_long", "Request target is too long")
@@ -284,8 +347,22 @@ class BackendHandler(BaseHTTPRequestHandler):
                 self._body(method)
                 self._events(token, query)
                 return
+            capture_path = _capture_path(split.path)
+            if method == "POST" and capture_path is not None:
+                if not self.server.capture_slots.acquire(blocking=False):
+                    raise _RequestError(503, "captures_busy", "Too many capture requests")
+                capture_admitted = True
             body = self._body(method)
             status, payload = self.server.service.handle(method, split.path, token, body=body, query=query)
+            if isinstance(payload, ObservationImage):
+                if status != 200 or method != "POST":
+                    raise _RequestError(500, "image_unavailable", "Image unavailable")
+                try:
+                    headers = _observation_headers(payload, capture_path or split.path)
+                except (TypeError, ValueError):
+                    raise _RequestError(500, "image_unavailable", "Image unavailable") from None
+                self._bytes_response(200, payload.data, "image/png", "no-store", headers)
+                return
             self._json_response(status, payload)
         except _RequestError as exc:
             self._error(exc.status, exc.code, exc.message)
@@ -295,6 +372,9 @@ class BackendHandler(BaseHTTPRequestHandler):
             self.close_connection = True
         except Exception:
             self._error(500, "internal_error", "Internal server error")
+        finally:
+            if capture_admitted:
+                self.server.capture_slots.release()
 
     def _events(self, token: str, query: dict[str, str]) -> None:
         if not self._wants_events():

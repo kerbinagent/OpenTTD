@@ -10,6 +10,7 @@
 #include "../stdafx.h"
 #include "renderer.h"
 #include "renderer_image.h"
+#include "renderer_observation.h"
 #include "renderer_input.h"
 #include "actions.h"
 #include "integration_bridge.h"
@@ -23,6 +24,7 @@
 #include "../fileio_type.h"
 #include "../gfx_func.h"
 #include "../gui.h"
+#include "../landscape.h"
 #include "../network/network.h"
 #include "../network/network_client.h"
 #include "../network/network_base.h"
@@ -67,6 +69,10 @@ constexpr size_t MAX_RETAINED_IMAGES = 4;
 constexpr int MAX_CAPTURE_WIDTH = 2560;
 constexpr int MAX_CAPTURE_HEIGHT = 1440;
 constexpr size_t MAX_CAPTURED_BUNDLES = 32;
+constexpr size_t MAX_OBSERVATIONS = 64;
+constexpr auto OBSERVATION_RETENTION = std::chrono::seconds(60);
+constexpr auto OBSERVATION_INTERVAL = std::chrono::milliseconds(100);
+constexpr int64_t OBSERVATION_COORDINATE_LIMIT = 1LL << 28;
 
 using TileSignature = std::array<uint8_t, 12>;
 
@@ -88,6 +94,17 @@ struct ScreenshotSnapshot {
 	uint32_t frame = 0;
 };
 
+/** Observation evidence never becomes a native UI/input snapshot. */
+struct ObservationSnapshot {
+	std::string request;
+	std::string payload;
+	uint64_t lifecycle_revision;
+	std::chrono::steady_clock::time_point created;
+	Json metadata;
+	std::filesystem::path artifact;
+	std::optional<Viewport> viewport;
+};
+
 struct RendererState {
 	CompanyID company = COMPANY_SPECTATOR;
 	std::string session;
@@ -98,6 +115,12 @@ struct RendererState {
 	size_t controls_in_interval = 0;
 	std::unique_ptr<ScreenshotSnapshot> screenshot;
 	Json image_metadata;
+	std::deque<ObservationSnapshot> observations;
+	std::chrono::steady_clock::time_point last_observation{};
+	int observation_gui_scale = 0;
+	ZoomLevel observation_font_zoom{};
+	bool observation_population_in_label = false;
+	bool observation_rendered_in_tick = false;
 	bool parked = false;
 	uint32_t parked_frame = 0;
 	uint64_t park_revision = 0;
@@ -278,6 +301,233 @@ bool PrepareDirectory()
 	return !error && (permissions & (std::filesystem::perms::group_all | std::filesystem::perms::others_all)) == std::filesystem::perms::none;
 }
 
+void PruneObservations()
+{
+	const auto now = std::chrono::steady_clock::now();
+	while (!_renderer.observations.empty() && now - _renderer.observations.front().created >= OBSERVATION_RETENTION) {
+		std::error_code error;
+		if (!_renderer.observations.front().artifact.empty()) std::filesystem::remove(_renderer.observations.front().artifact, error);
+		/* Retain a slot if its file cannot be removed; admitting replacement files
+		 * despite an unlink failure would lose the disk-space bound. */
+		if (error) break;
+		_renderer.observations.pop_front();
+	}
+}
+
+void ObservationKeys(const Json &value, std::initializer_list<std::string_view> required, std::initializer_list<std::string_view> optional = {})
+{
+	if (!value.is_object()) throw std::invalid_argument("Observation object required");
+	for (auto key : required) if (!value.contains(std::string(key))) throw std::invalid_argument("Observation field missing");
+	for (const auto &[key, child] : value.items()) {
+		if (std::find(required.begin(), required.end(), key) == required.end() && std::find(optional.begin(), optional.end(), key) == optional.end()) {
+			throw std::invalid_argument("Unknown observation field");
+		}
+	}
+}
+
+uint64_t ObservationInteger(const Json &value, uint64_t maximum)
+{
+	if (!value.is_number_integer()) throw std::invalid_argument("Observation integer required");
+	if (value.is_number_unsigned()) {
+		const uint64_t number = value.get<uint64_t>();
+		if (number <= maximum) return number;
+	} else {
+		const int64_t number = value.get<int64_t>();
+		if (number >= 0 && static_cast<uint64_t>(number) <= maximum) return number;
+	}
+	throw std::invalid_argument("Observation integer out of bounds");
+}
+
+ZoomLevel ObservationZoom(const Json &value)
+{
+	static constexpr std::pair<std::string_view, ZoomLevel> levels[] = {
+		{"in4x", ZoomLevel::In4x}, {"in2x", ZoomLevel::In2x}, {"normal", ZoomLevel::Normal},
+		{"out2x", ZoomLevel::Out2x}, {"out4x", ZoomLevel::Out4x}, {"out8x", ZoomLevel::Out8x},
+	};
+	if (value.is_string()) for (const auto &[name, zoom] : levels) {
+		if (value == name && zoom >= _settings_client.gui.zoom_min && zoom <= _settings_client.gui.zoom_max) return zoom;
+	}
+	throw std::invalid_argument("Invalid observation zoom");
+}
+
+ObservationLabels ReadObservationLabels(const Json &value)
+{
+	ObservationKeys(value, {"town_names", "station_names", "waypoint_names", "signs", "competitor_labels"});
+	for (const auto &child : value) if (!child.is_boolean()) throw std::invalid_argument("Observation label boolean required");
+	return {value.at("town_names").get<bool>(), value.at("station_names").get<bool>(), value.at("waypoint_names").get<bool>(),
+		value.at("signs").get<bool>(), value.at("competitor_labels").get<bool>()};
+}
+
+struct ExpiredObservation : std::exception {};
+
+int ObservationCoordinate(int64_t value)
+{
+	if (value < -OBSERVATION_COORDINATE_LIMIT || value > OBSERVATION_COORDINATE_LIMIT) throw std::invalid_argument("Observation coordinate out of bounds");
+	return static_cast<int>(value);
+}
+
+Viewport ObservationViewport(const Json &params)
+{
+	const auto &output = params.at("output");
+	ObservationKeys(output, {"width", "height"});
+	Viewport viewport{};
+	viewport.width = static_cast<int>(ObservationInteger(output.at("width"), MAX_OBSERVATION_WIDTH));
+	viewport.height = static_cast<int>(ObservationInteger(output.at("height"), MAX_OBSERVATION_HEIGHT));
+	if (viewport.width < 64 || viewport.height < 64 || static_cast<uint64_t>(viewport.width) * viewport.height > MAX_OBSERVATION_PIXELS) throw std::invalid_argument("Invalid observation dimensions");
+	const auto &selection = params.at("selection");
+	if (!selection.is_object()) throw std::invalid_argument("Observation selection required");
+	viewport.zoom = ObservationZoom(selection.at("zoom_level"));
+	viewport.virtual_width = ScaleByZoom(viewport.width, viewport.zoom);
+	viewport.virtual_height = ScaleByZoom(viewport.height, viewport.zoom);
+	if (static_cast<uint64_t>(viewport.virtual_width) * viewport.virtual_height > MAX_OBSERVATION_VIRTUAL_AREA) throw std::invalid_argument("Observation coverage exceeds limits");
+	Point center;
+	if (selection.at("kind") == "map_center") {
+		ObservationKeys(selection, {"kind", "tile", "zoom_level"});
+		const auto &tile = selection.at("tile");
+		ObservationKeys(tile, {"x", "y"});
+		const uint32_t x = static_cast<uint32_t>(ObservationInteger(tile.at("x"), Map::SizeX() - 1));
+		const uint32_t y = static_cast<uint32_t>(ObservationInteger(tile.at("y"), Map::SizeY() - 1));
+		if (!IsValidTile(TileXY(x, y))) throw std::invalid_argument("Invalid observation center");
+		const int world_x = x * TILE_SIZE + TILE_SIZE / 2;
+		const int world_y = y * TILE_SIZE + TILE_SIZE / 2;
+		center = RemapCoords(world_x, world_y, GetSlopePixelZ(world_x, world_y));
+	} else if (selection.at("kind") == "map_image_point") {
+		ObservationKeys(selection, {"kind", "image_id", "pixel", "zoom_level"});
+		const auto &pixel = selection.at("pixel");
+		ObservationKeys(pixel, {"x", "y"});
+		const auto found = std::find_if(_renderer.observations.begin(), _renderer.observations.end(), [&](const ObservationSnapshot &source) {
+			return source.viewport.has_value() && source.metadata.is_object() && source.metadata.value("image_id", Json()) == selection.at("image_id");
+		});
+		if (found == _renderer.observations.end() || found->lifecycle_revision != _lifecycle_revision.load() ||
+				std::chrono::steady_clock::now() - found->created >= OBSERVATION_RETENTION) throw ExpiredObservation();
+		const Viewport &source = *found->viewport;
+		const int x = static_cast<int>(ObservationInteger(pixel.at("x"), source.width - 1));
+		const int y = static_cast<int>(ObservationInteger(pixel.at("y"), source.height - 1));
+		/* Preserve the chosen projected image point. Never identify a tile or entity. */
+		center = {ObservationCoordinate(static_cast<int64_t>(source.virtual_left) + ScaleByZoom(x, source.zoom)),
+			ObservationCoordinate(static_cast<int64_t>(source.virtual_top) + ScaleByZoom(y, source.zoom))};
+	} else throw std::invalid_argument("Invalid observation selection");
+	const int mask = -ScaleByZoom(1, viewport.zoom);
+	viewport.virtual_left = ObservationCoordinate(static_cast<int64_t>(center.x) - viewport.virtual_width / 2) & mask;
+	viewport.virtual_top = ObservationCoordinate(static_cast<int64_t>(center.y) - viewport.virtual_height / 2) & mask;
+	ObservationCoordinate(static_cast<int64_t>(viewport.virtual_left) + viewport.virtual_width);
+	ObservationCoordinate(static_cast<int64_t>(viewport.virtual_top) + viewport.virtual_height);
+	return viewport;
+}
+
+Json PublishObservation(ObservationSnapshot &snapshot, ObservationPixels pixels, std::optional<Viewport> viewport, const char *kind)
+{
+	/* A previous failed publication may have copied a file before metadata allocation failed. */
+	if (!snapshot.artifact.empty()) {
+		std::error_code error;
+		std::filesystem::remove(snapshot.artifact, error);
+		snapshot.artifact.clear();
+	}
+	RendererImage image = EncodeRendererImage(pixels.rgb, pixels.width, pixels.height);
+	const std::string image_id = OpaqueId();
+	const std::filesystem::path path = std::filesystem::path(_renderer.directory) / ("observation-" + image_id + ".png");
+	auto file = FileHandle::Open(path.string(), "wbx");
+	if (!file.has_value()) return Failure("capture_unavailable");
+	const bool written = fwrite(image.bytes.data(), 1, image.bytes.size(), *file) == image.bytes.size() && fflush(*file) == 0;
+	file->Close();
+	std::error_code error;
+	if (written) std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write, std::filesystem::perm_options::replace, error);
+	if (!written || error) { std::filesystem::remove(path, error); return Failure("capture_unavailable"); }
+	/* Publish only after the entire immutable artifact is available. */
+	snapshot.artifact = path;
+	snapshot.viewport = std::move(viewport);
+	snapshot.metadata = {{"image_id", image_id}, {"path", path.string()}, {"width", pixels.width}, {"height", pixels.height},
+		{"content_type", image.content_type}, {"capture_kind", kind}, {"source_frame", _frame_counter},
+		{"authority_instance_id", _renderer.authority_instance}, {"world_epoch", _renderer.world_epoch}, {"worker_instance_id", InstanceId()},
+		{"renderer_lifecycle_revision", snapshot.lifecycle_revision}};
+	return snapshot.metadata;
+}
+
+Json Observe(const Json &params, bool world)
+{
+	try {
+		if (world) ObservationKeys(params, {"observation_request_id", "authority_instance_id", "selection", "output", "labels"}, {"minimum_source_frame"});
+		else ObservationKeys(params, {"observation_request_id", "authority_instance_id", "panel", "presentation", "region"}, {"minimum_source_frame"});
+		const auto &request = params.at("observation_request_id");
+		if (!request.is_string()) return Failure("invalid_request");
+		const auto &id = request.get_ref<const std::string &>();
+		if (id.size() != 32 || !std::all_of(id.begin(), id.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) return Failure("invalid_request");
+		PruneObservations();
+		if (!Ready()) return Failure("renderer_not_ready");
+		if (_renderer.authority_instance.empty() || params.at("authority_instance_id") != _renderer.authority_instance) return Failure("observation_expired");
+#ifndef WITH_PNG
+		return Failure("png_required");
+#else
+		const std::string payload = Json{{"kind", world ? "world" : "native_info"}, {"parameters", params}}.dump();
+		auto found = std::find_if(_renderer.observations.begin(), _renderer.observations.end(), [&](const ObservationSnapshot &snapshot) { return snapshot.request == id; });
+		if (found != _renderer.observations.end()) {
+			if (found->payload != payload) return Failure("invalid_request");
+			if (found->lifecycle_revision != _lifecycle_revision.load() ||
+					std::chrono::steady_clock::now() - found->created >= OBSERVATION_RETENTION) return Failure("observation_expired");
+			if (found->metadata.is_object()) return found->metadata;
+		}
+		const uint32_t minimum_frame = params.contains("minimum_source_frame") ? static_cast<uint32_t>(ObservationInteger(params.at("minimum_source_frame"), UINT32_MAX)) : 0;
+		std::optional<Viewport> viewport;
+		ObservationLabels labels{};
+		bool compact = false;
+		uint8_t criterion = 0;
+		bool descending = false;
+		uint32_t first_row = 0;
+		if (world) {
+			labels = ReadObservationLabels(params.at("labels"));
+			viewport = ObservationViewport(params);
+		} else {
+			if (params.at("region") != "window") return Failure("invalid_request");
+			const auto &presentation = params.at("presentation");
+			if (params.at("panel") == "company_finances") {
+				ObservationKeys(presentation, {"layout"});
+				if (presentation.at("layout") != "compact" && presentation.at("layout") != "expanded") return Failure("invalid_request");
+				compact = presentation.at("layout") == "compact";
+			} else if (params.at("panel") == "town_directory") {
+				ObservationKeys(presentation, {"sort", "scroll"});
+				const auto &sort = presentation.at("sort");
+				ObservationKeys(sort, {"by", "direction"});
+				if (sort.at("by") == "name") criterion = 0;
+				else if (sort.at("by") == "population") criterion = 1;
+				else if (sort.at("by") == "rating") criterion = 2;
+				else return Failure("invalid_request");
+				if (sort.at("direction") != "ascending" && sort.at("direction") != "descending") return Failure("invalid_request");
+				descending = sort.at("direction") == "descending";
+				ObservationKeys(presentation.at("scroll"), {"first_row"});
+				first_row = static_cast<uint32_t>(ObservationInteger(presentation.at("scroll").at("first_row"), UINT32_MAX));
+			} else return Failure("invalid_request");
+		}
+		if (found == _renderer.observations.end()) {
+			if (_renderer.observations.size() >= MAX_OBSERVATIONS) return Failure("rate_limited");
+			_renderer.observations.push_back({id, payload, _lifecycle_revision.load(), std::chrono::steady_clock::now(), Json(), {}, {}});
+			found = std::prev(_renderer.observations.end());
+		}
+		/* IPC runs at the settled beginning of GameLoop. Never wait here for replay:
+		 * returning lets the coordinator retry while NetworkGameLoop advances. */
+		if (_frame_counter < minimum_frame) return Failure("replica_pending");
+		if (!world && (!_renderer.active_request.empty() || RendererShouldPark())) return Failure("renderer_busy");
+		/* Never make a temporary population-label change: cached town-sign geometry would
+		 * become inconsistent. The configured worker's font/format profile is immutable. */
+		if (_renderer.observation_gui_scale != _gui_scale || _renderer.observation_font_zoom != _font_zoom ||
+				_renderer.observation_population_in_label != _settings_client.gui.population_in_label) return Failure("capture_unavailable");
+		const auto now = std::chrono::steady_clock::now();
+		if (_renderer.observation_rendered_in_tick || now - _renderer.last_observation < OBSERVATION_INTERVAL) return Failure("rate_limited");
+		if (!PrepareDirectory()) return Failure("capture_unavailable");
+		_renderer.last_observation = now;
+		_renderer.observation_rendered_in_tick = true;
+		AutoRestoreBackup company_scope(_current_company, _renderer.company);
+		if (world) return PublishObservation(*found, DrawWorldObservation(*viewport, labels), viewport, "world");
+		Window *window = params.at("panel") == "company_finances" ?
+			PrepareCompanyFinancesWindowForCapture(_renderer.company, compact) : PrepareTownDirectoryWindowForCapture(criterion, descending, first_row);
+		if (window == nullptr) return Failure("capture_unavailable");
+		return PublishObservation(*found, DrawNativePanelObservation(*window), {}, "native_info");
+#endif
+	} catch (const ExpiredObservation &) { return Failure("observation_expired"); }
+	catch (const std::invalid_argument &) { return Failure("invalid_request"); }
+	catch (const Json::exception &) { return Failure("invalid_request"); }
+	catch (const std::exception &) { return Failure("capture_unavailable"); }
+}
+
 } // namespace
 
 bool RendererIsActive()
@@ -302,8 +552,15 @@ bool RendererShouldPark()
 
 void RendererTick()
 {
-	if (RendererIsActive()) RendererShouldPark();
+	if (RendererIsActive()) {
+		RendererShouldPark();
+		PruneObservations();
+	}
 }
+
+Json RendererObserveWorld(const Json &params) { return Observe(params, true); }
+Json RendererObserveNativeInfo(const Json &params) { return Observe(params, false); }
+void RendererBeginObservationTick() { _renderer.observation_rendered_in_tick = false; }
 
 void RendererInvalidateSnapshot()
 {
@@ -329,6 +586,9 @@ void ConfigureRenderer(CompanyID company, const std::string &session, const std:
 	if (!_renderer.session.empty()) throw std::invalid_argument("Rendering worker binding is immutable");
 	_renderer.company = company;
 	_renderer.session = session;
+	_renderer.observation_gui_scale = _gui_scale;
+	_renderer.observation_font_zoom = _font_zoom;
+	_renderer.observation_population_in_label = _settings_client.gui.population_in_label;
 	_settings_client.gui.auto_scrolling = ViewportAutoscrolling::Disabled;
 	_renderer.screenshot.reset();
 	const char *directory = std::getenv("OPENTTD_RENDERER_IMAGE_DIR");

@@ -4,25 +4,43 @@ from __future__ import annotations
 
 import json
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 import io
 import os
 from pathlib import Path
 import subprocess
+import struct
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import zlib
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
+from urllib.parse import unquote
 from urllib.request import Request, urlopen
 
 from backend import http
 from backend.__main__ import _renderer_config, main
 from backend.client import BackendClient, BackendError, MAX_IMAGE_BYTES, credential_from_env_or_file
 from backend.errors import ServiceError
+from backend.observations import ObservationImage
 from backend.store import Store
+
+
+def observation_image(**changes):
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data +
+                struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
+
+    data = (b"\x89PNG\r\n\x1a\n" +
+            chunk(b"IHDR", struct.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 0)) +
+            chunk(b"IDAT", zlib.compress((b"\0" + b"\0" * (3 * 64)) * 64)) + chunk(b"IEND", b""))
+    return replace(ObservationImage(data, "a" * 32, "b" * 32, "c" * 32, "world",
+                                    64, 64, "none", False, 0), **changes)
 
 
 class StubService:
@@ -179,6 +197,181 @@ class HTTPTest(unittest.TestCase):
         before = len(self.service.image_calls)
         self.fetch("/v1/images/image_1/extra", headers={"Authorization": "Bearer secret"})
         self.assertEqual(len(self.service.image_calls), before)
+
+    def test_selected_observation_is_finite_png_with_only_public_metadata(self):
+        for kind, path in (("world", "/v1/view/observe/world"),
+                           ("native_info", "/v1/view/observe/native-info")):
+            with self.subTest(kind=kind):
+                image = observation_image(kind=kind, causal_state="satisfied", reused=True, age_ms=12)
+                object.__setattr__(image, "source_frame", 123)
+                object.__setattr__(image, "private_path", "/private/artifact.png")
+                request = Request(self.origin + path, data=b"{}", method="POST", headers={
+                    "Authorization": "Bearer secret", "Content-Type": "application/json", "Range": "bytes=0-2",
+                })
+                with mock.patch.object(self.service, "handle", return_value=(200, image)):
+                    with urlopen(request, timeout=3) as response:
+                        self.assertEqual((response.status, response.read()), (200, image.data))
+                        self.assertEqual(response.headers["Content-Type"], "image/png")
+                        self.assertEqual(response.headers["Content-Length"], str(len(image.data)))
+                        self.assertEqual(response.headers["Cache-Control"], "no-store")
+                        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+                        self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
+                        self.assertEqual({key: value for key, value in response.headers.items()
+                                          if key.startswith("X-OpenTTD-")}, {
+                            "X-OpenTTD-Observation-Id": "a" * 32,
+                            "X-OpenTTD-Image-Id": "b" * 32,
+                            "X-OpenTTD-Observation-Generation": "c" * 32,
+                            "X-OpenTTD-Capture-Kind": kind,
+                            "X-OpenTTD-Image-Width": "64", "X-OpenTTD-Image-Height": "64",
+                            "X-OpenTTD-Causal-State": "satisfied", "X-OpenTTD-Image-Reused": "true",
+                            "X-OpenTTD-Image-Age-Ms": "12", "X-OpenTTD-Image-Purpose": "observation",
+                        })
+                        self.assertIsNone(response.headers["ETag"])
+                        self.assertIsNone(response.headers["Accept-Ranges"])
+
+    def test_selected_observation_pending_stays_finite_json(self):
+        pending = {"status": "pending", "observation_request_id": "obs1:1234567890000:" + "a" * 32}
+        with mock.patch.object(self.service, "handle", return_value=(202, pending)):
+            status, body = self.fetch("/v1/view/observe/world", method="POST", body=b"{}", headers={
+                "Authorization": "Bearer secret", "Content-Type": "application/json",
+            })
+        self.assertEqual((status, json.loads(body)), (202, pending))
+
+    def test_invalid_selected_observation_never_commits_png_headers(self):
+        valid = observation_image()
+        for changes in (
+            {"observation_id": "a" * 32 + "\r\nPrivate: path"}, {"image_id": "bad"},
+            {"generation": "A" * 32}, {"kind": "native_info"}, {"width": True},
+            {"width": 63}, {"height": 65}, {"reused": 1}, {"causal_state": "private"},
+            {"age_ms": -1}, {"age_ms": 65001}, {"data": valid.data[:-1]},
+        ):
+            with self.subTest(changes=list(changes)):
+                request = Request(self.origin + "/v1/view/observe/world", data=b"{}", method="POST", headers={
+                    "Authorization": "Bearer secret", "Content-Type": "application/json",
+                })
+                with mock.patch.object(self.service, "handle", return_value=(200, replace(valid, **changes))):
+                    with self.assertRaises(HTTPError) as error:
+                        urlopen(request, timeout=3)
+                    with error.exception as response:
+                        self.assertEqual(response.code, 500)
+                        self.assertEqual(response.headers["Content-Type"], "application/json; charset=utf-8")
+                        self.assertEqual(json.loads(response.read())["error"]["code"], "image_unavailable")
+                        self.assertFalse(any(key.startswith("X-OpenTTD-") for key in response.headers))
+
+    def test_eight_capture_slots_preserve_normal_requests(self):
+        paths = ("/v1/view/images", "/v1/view/observe/world", "/v1/view/observe/native-info")
+        release = threading.Event()
+        started = 0
+        lock = threading.Lock()
+        original = self.service.handle
+
+        def blocking_capture(method, path, token, body=None, query=None):
+            nonlocal started
+            if method == "POST" and path in paths:
+                with lock:
+                    started += 1
+                if not release.wait(5):
+                    raise RuntimeError("capture gate timed out")
+            return original(method, path, token, body, query)
+
+        headers = {"Authorization": "Bearer secret", "Content-Type": "application/json"}
+        with mock.patch.object(self.service, "handle", side_effect=blocking_capture), ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(self.fetch, paths[index % 3], method="POST", body=b"{}", headers=headers)
+                       for index in range(8)]
+            try:
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    with lock:
+                        count = started
+                    if count == 8:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(count, 8)
+                for path in paths:
+                    status, body = self.fetch(path, method="POST", body=b"{}", headers=headers)
+                    self.assertEqual((status, json.loads(body)["error"]["code"]), (503, "captures_busy"))
+                for method, path, body in (("POST", "/v1/actions", b"{}"),
+                                           ("POST", "/v1/threads/t/messages", b"{}"), ("GET", "/v1/me", None)):
+                    status, _ = self.fetch(path, method=method, body=body, headers=headers)
+                    self.assertEqual(status, 200)
+                request = Request(self.origin + "/v1/images/image_1", headers={"Authorization": "Bearer secret"})
+                with urlopen(request, timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+                    response.read()
+                previous = http.STREAM_LIFETIME
+                http.STREAM_LIFETIME = 0.05
+                try:
+                    status, _ = self.fetch("/v1/events", headers={
+                        "Authorization": "Bearer secret", "Accept": "text/event-stream",
+                    })
+                    self.assertEqual(status, 200)
+                finally:
+                    http.STREAM_LIFETIME = previous
+                self.assertEqual(started, 8)
+            finally:
+                release.set()
+            self.assertTrue(all(future.result()[0] == 200 for future in futures))
+        status, _ = self.fetch(paths[0], method="POST", body=b"{}", headers=headers)
+        self.assertEqual(status, 200)
+
+    def test_encoded_and_slash_capture_routes_share_the_generation_budget(self):
+        release = threading.Event()
+        started = 0
+        lock = threading.Lock()
+        original = self.service.handle
+
+        def domain_routing_capture(method, path, token, body=None, query=None):
+            nonlocal started
+            parts = [unquote(part) for part in path.strip("/").split("/")]
+            if method == "POST" and parts == ["v1", "view", "images"]:
+                with lock:
+                    started += 1
+                if not release.wait(5):
+                    raise RuntimeError("capture gate timed out")
+            return original(method, path, token, body, query)
+
+        headers = {"Authorization": "Bearer secret", "Content-Type": "application/json"}
+        with mock.patch.object(self.service, "handle", side_effect=domain_routing_capture), ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(self.fetch, "/v1/view/%69mages", method="POST", body=b"{}", headers=headers)
+                       for _ in range(8)]
+            try:
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    with lock:
+                        count = started
+                    if count == 8:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(count, 8)
+                for path in ("/v1/view/images", "/v1/view/%69mages", "/v1/view/images/",
+                             "//v1/view/images//", "/%761/view/images",
+                             "/v1/view/%6fbserve/world", "/v1/view/observe/world/",
+                             "//v1/view/observe/world//", "/v1/view/%6fbserve/native-info",
+                             "/v1/view/observe/native-info/", "//v1/view/observe/native-info//"):
+                    with self.subTest(path=path):
+                        status, body = self.fetch(path, method="POST", body=b"{}", headers=headers)
+                        self.assertEqual((status, json.loads(body)["error"]["code"]), (503, "captures_busy"))
+                status, _ = self.fetch("/v1/actions", method="POST", body=b"{}", headers=headers)
+                self.assertEqual(status, 200)
+                self.assertEqual(started, 8)
+            finally:
+                release.set()
+            self.assertTrue(all(future.result()[0] == 200 for future in futures))
+        status, _ = self.fetch("/v1/view/%69mages", method="POST", body=b"{}", headers=headers)
+        self.assertEqual(status, 200)
+
+    def test_selected_observation_alternate_spellings_return_png(self):
+        for kind, path in (("world", "/v1/view/%6fbserve/world/"),
+                           ("native_info", "//v1/view/observe/native-info//")):
+            with self.subTest(path=path):
+                image = observation_image(kind=kind)
+                request = Request(self.origin + path, data=b"{}", method="POST", headers={
+                    "Authorization": "Bearer secret", "Content-Type": "application/json",
+                })
+                with mock.patch.object(self.service, "handle", return_value=(200, image)):
+                    with urlopen(request, timeout=3) as response:
+                        self.assertEqual((response.status, response.read()), (200, image.data))
+                        self.assertEqual(response.headers["X-OpenTTD-Capture-Kind"], kind)
 
     def test_credential_file_owner_mode(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -84,3 +84,58 @@ Recovery is a fence/reconciliation handshake, not blind action replay. Compare l
 Native outage policy is bounded and fail-closed: unknown/private scope or missing participant binding never falls through to broadcast; engine retains bounded unacknowledged ingress or gives a native-visible unavailable status. Native client-to-client intent must resolve to stable principals from the captured roster, not the receiver's later reused ClientID. Native spectators require an explicit world-chat-only principal binding (no company-scoped actions); company membership changes revoke old run access while preserving stable identity/history policy. Initial safe subset can gate unreviewed direct/spectator routing explicitly, but cannot claim full MVP communication until exercised.
 
 Revision 2 independent review completed and the main peer released the core and canonical native-chat implementation. A separate gateway review approved immutable run/socket mapping, serialized artifact access, positive PNG validation and bounded caching. Live acceptance and visual construction remain separate gates. See architecture.md for the implemented design.
+
+## Selected observations: architecture review, 2026-10-18
+
+The capture-improvement plan was reviewed before implementation by an independent
+architecture agent. The approved first slice uses the existing run-to-renderer
+mapping and two closed POST routes: `/v1/view/observe/world` and
+`/v1/view/observe/native-info`. It adds no public view registry, desktop supervisor,
+semantic camera, OCR report, second gameplay ledger or combined action endpoint.
+The [capture guide](../docs/capture-controls.md) specifies the implemented public
+contract; runtime and gameplay results belong in the validation ledger.
+
+The main simplifications and retained boundaries are:
+
+- Map observations use a bounded request-local native viewport. Callers choose
+  a center or a point in their retained map image, absolute zoom, dimensions and
+  native labels. Projection remains private; selection returns pixels rather
+  than derived coordinates or object data. Scoped drawing state is restored
+  without changing the interactive desktop camera.
+- The two supported information panels are real own-company finance and town
+  directory windows. Native layout/cache preparation followed by offscreen
+  `OnPaint()` avoids adding a general window-compositing or occlusion framework.
+  The allowlist remains small because arbitrary windows can contain viewports,
+  animations, callbacks or other state that need separate review. Active native
+  interaction ownership is checked before panel changes.
+- Observation records and immutable pixels stay separate from interaction
+  snapshots and input/inspection proofs. Observation drawing never creates a
+  model-thinking-time park. An existing UI lease remains exclusive; selected
+  reads cannot cancel it or convert an old image into a click authority.
+- `after_request_id` reuses the native ledger's execution frame and boot evidence.
+  The coordinator waits for replica progress outside the game thread and checks
+  authority continuity. No new persistent execution-order journal or public
+  replay-frame field is introduced. A completed action can remain known while a
+  subsequent image fails or stays pending.
+- Read retries use generation-scoped, timestamped identities and finite retained
+  fingerprints. The reviewed refinement rejects expired identities even when
+  their PNG was evicted, preventing the same read identity from silently drawing
+  new pixels. Capacity is a temporary bound on unexpired requests, not a lifetime
+  request quota; backend restart or detected renderer replacement changes context.
+- Direct success is a typed immutable image response projected to PNG plus a
+  finite header set in both HTTP adapters. Capture generation has its own bounded
+  workers, separate from action/chat and image lookup capacity. Native draws are
+  still serialized and bounded; configured limits establish no performance SLA.
+- The small stdlib MCP adapter composes the public routes and existing action
+  ledger. It emits actual image blocks, shares a canonical saved-action primitive
+  with public clients, and preserves exact retries and partial success. An
+  optional local observation key recovers a lost whole tool reply without
+  exposing another server identity mechanism. HTTP/image emission correlation
+  measures delivery work, not model understanding.
+
+Separate correctness reviews cover native drawing and state restoration, backend
+ownership/retry/barrier checks, transport admission and binary projection, and
+adapter protocol/recovery behavior. These review boundaries do not replace
+isolated live rendering checks, latency measurements or fresh Luna gameplay
+acceptance. Broad panel coverage, multi-view desktop multiplexing, automatic
+semantic navigation and image batches remain later design decisions.

@@ -51,6 +51,7 @@ void ShowBuildTreesToolbar();
 
 /* town_gui.cpp */
 void ShowTownDirectory();
+Window *PrepareTownDirectoryWindowForCapture(uint8_t criterion, bool descending, uint32_t first_row);
 void ShowFoundTownWindow();
 
 /* industry_gui.cpp */

@@ -14,12 +14,15 @@
 #include "group_type.h"
 #include "gfx_type.h"
 
+struct Window;
+
 ExtendedTextColour GetDrawStringCompanyColour(CompanyID company);
 void DrawCompanyIcon(CompanyID c, int x, int y);
 
 void ShowCompanyLiveryWindow(CompanyID company, GroupID group);
 void ShowCompanyStations(CompanyID company);
 void ShowCompanyFinances(CompanyID company);
+Window *PrepareCompanyFinancesWindowForCapture(CompanyID company, bool compact);
 void ShowCompany(CompanyID company);
 
 void InvalidateCompanyWindows(const Company *c);

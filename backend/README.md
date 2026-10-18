@@ -36,9 +36,11 @@ python3 -m backend serve --transport asgi \
 
 To attach one renderer, supply all three renderer options together: `--renderer-run RUN_ID --renderer-socket /run/openttd/renderer.sock --renderer-artifacts /run/openttd/render-artifacts`. To attach several, use `--renderer-config /etc/openttd/renderers.json` with the shape in [renderers.example.json](deploy/renderers.example.json). Replace its four sample IDs with active text or visual run IDs returned by authenticated `GET /v1/me`, and use distinct sockets and artifact directories. The config file must be a canonical absolute path, owner-only regular file, at most 32 KiB; unknown fields, duplicate keys, inactive or wrong-world runs, and reused paths fail startup. Artifact directories must already exist as canonical absolute paths owned by the backend account with owner-only permissions. The gateway reads only verified, immutable PNG artifacts from those directories; HTTP callers never supply a file path.
 
-The example [Caddyfile](deploy/Caddyfile.example) terminates HTTPS and proxies to the loopback ASGI listener. Use Caddy 2.11.7 and replace the example hostname with a real domain; operate Caddy separately from this process. A checksum-verified local Caddy 2.11.7 binary and local CA were used to smoke-test HTTPS viewer assets, `/v1/me`, authenticated PNG capture, SSE, and a `401` without credentials. That local check did not deploy an external site or install CA trust. Run exactly one ASGI worker per world because each worker would otherwise start another world broker and renderer gateway. ASGI admits 64 SSE streams, 64 pending or sending PNG responses and 64 other API requests. General API work uses its existing 64-thread limiter, so a burst of capture calls leaves capacity for the measured action/chat workload. Image lookup uses a separate eight-thread limit; admitted image requests wait for those workers and retain their response slot through body delivery. Uvicorn's 128-connection limit is a separate overload bound, not a reservation for API traffic. SSE has a 60-second lifetime, ten-second heartbeat and five-second slow-reader deadline. PNG delivery also has a five-second deadline. At the 16 MiB image limit, 64 distinct responses could retain roughly 1 GiB before other process memory; measure RSS for the actual workload.
+The example [Caddyfile](deploy/Caddyfile.example) terminates HTTPS and proxies to the loopback ASGI listener. Use Caddy 2.11.7 and replace the example hostname with a real domain; operate Caddy separately from this process. A checksum-verified local Caddy 2.11.7 binary and local CA were used to smoke-test HTTPS viewer assets, `/v1/me`, authenticated PNG capture, SSE, and a `401` without credentials. That local check did not deploy an external site or install CA trust. Run exactly one ASGI worker per world because each worker would otherwise start another world broker and renderer gateway.
 
-The public viewer assets are exactly `/`, `/viewer.js`, `/viewer.css`, `/events.mjs` and `/world-status.mjs`. All `/v1` requests require `Authorization: Bearer <credential>`. The token determines world, company, identity, run and mode. The backend supports `GET /v1/me`, `GET /v1/participants`, `GET /v1/capabilities`, `GET /v1/world/status`, action submit/status, text observations, threads/messages, blocks, mutes, reports and projected events. Native spectators can use world chat, while private and company chat are forbidden. Participant listings suppress verified managed renderer keys using retained provenance. Both perception modes may receive an optional `native_handle` for an active native human connection after a fresh world/roster check and renderer classification. Uncertain classification omits all handles and blocks fresh access authorization. Previously unknown worker rows can still appear in a degraded listing. With a configured renderer, `POST /v1/view/images` captures a read-only view, `POST /v1/view/controls` changes that run's view, and authenticated `GET /v1/images/{image_id}` returns binary PNG with `Cache-Control: no-store`. Each image GET checks the credential and returns only the run's original unexpired cached bytes. It does not contact or lock the native worker; an existing PNG does not prove the worker is still live or that the image can still control the UI. Browser code fetches that image with a bearer header and displays a local Blob URL; credentials never appear in URLs. `GET /v1/events` returns JSON by default. Set `Accept: text/event-stream` to receive SSE. Resume with `Last-Event-ID` or `?after=<cursor>`; the header takes precedence. Events and history are filtered to the authenticated recipient. A stale or wrong-scope cursor requires resynchronization through authorized reads. The ASGI transport caps JSON bodies at 64 KiB, rejects duplicate keys and nonfinite numbers, and waits for persisted events without an event queue per viewer.
+ASGI admits 64 SSE streams, 64 image GET responses, 64 general API requests and a separate eight capture-generation requests. Capture POSTs (`/v1/view/images` and both `/v1/view/observe/*` routes) use eight dedicated worker threads and retain admission through generation and bounded response delivery. Selected observations additionally share four gateway coordination slots; one renderer still serializes native work. General API work uses its own 64-thread limiter, image GET lookup uses eight separate threads, and capture saturation does not consume those command/chat workers. These bounds are not a workload or latency guarantee. Uvicorn's 128-connection limit is a separate overload bound, not a reservation for API traffic. SSE has a 60-second lifetime, ten-second heartbeat and five-second slow-reader deadline; PNG delivery also has a five-second deadline. At the 16 MiB image limit, 64 distinct image GET responses could retain roughly 1 GiB before other process memory; measure RSS for the actual workload.
+
+The public viewer assets are exactly `/`, `/viewer.js`, `/viewer.css`, `/events.mjs` and `/world-status.mjs`. All `/v1` requests require `Authorization: Bearer <credential>`. The token determines world, company, identity, run and mode. The backend supports `GET /v1/me`, `GET /v1/participants`, `GET /v1/capabilities`, `GET /v1/world/status`, action submit/status, text observations, threads/messages, blocks, mutes, reports and projected events. Native spectators can use world chat, while private and company chat are forbidden. Participant listings suppress verified managed renderer keys using retained provenance. Both perception modes may receive an optional `native_handle` for an active native human connection after a fresh world/roster check and renderer classification. Uncertain classification omits all handles and blocks fresh access authorization. Previously unknown worker rows can still appear in a degraded listing. With a configured renderer, `POST /v1/view/images` obtains an interaction screenshot, `POST /v1/view/controls` changes that run's view, and authenticated `GET /v1/images/{image_id}` returns binary PNG with `Cache-Control: no-store`. Version-matched renderers additionally advertise `selected_observations`: `/v1/view/observe/world` and `/v1/view/observe/native-info` return selected observation-purpose PNGs directly in their POST response, without a native input lease. Each image GET checks the credential and returns only the run's original unexpired cached bytes. It does not contact or lock the native worker; an existing PNG does not prove the worker is still live or that the image can still control the UI. Browser code fetches that image with a bearer header and displays a local Blob URL; credentials never appear in URLs. `GET /v1/events` returns JSON by default. Set `Accept: text/event-stream` to receive SSE. Resume with `Last-Event-ID` or `?after=<cursor>`; the header takes precedence. Events and history are filtered to the authenticated recipient. A stale or wrong-scope cursor requires resynchronization through authorized reads. The ASGI transport caps JSON bodies at 64 KiB, rejects duplicate keys and nonfinite numbers, and waits for persisted events without an event queue per viewer.
 
 The reference client reads a token from `OPENTTD_BACKEND_TOKEN` or an owner-only file:
 
@@ -92,7 +94,55 @@ body = {"request_id": uuid.uuid4().hex, "action": {
 
 Persist that complete body in the application's durable request log **before** the first `client.request("POST", "/v1/actions", body)`. On restart or a lost reply, reload that body; do not generate a replacement ID or update its handle/image. Poll `client.request("GET", "/v1/actions/" + body["request_id"])` or consume action events. A new intentional action gets a new UUID; do not recycle the illustrative `click-001` below across unrelated actions or runs. Each step in a route-building sequence has its own receipt; earlier successful steps remain applied if a later step fails.
 
-For a visual run, fetch pixels through the authenticated binary helper:
+For a capture run with `selected_observations` advertised by `/v1/capabilities`,
+select a native map image and receive its PNG in the observation POST:
+
+```python
+from backend.observations import ObservationImage
+
+view_request = client.new_observation_request("world", {
+    "selection": {"kind": "map_center", "tile": {"x": 64, "y": 64},
+                  "zoom_level": "normal"},
+    "output": {"width": 800, "height": 600},
+})
+# Save this body before sending when exact lost-reply recovery is required.
+view = client.observe_world(view_request)
+if isinstance(view, ObservationImage):
+    png = view.data
+```
+
+`observe_native_info` similarly returns the real own-company finance window or
+town directory. Selected images have purpose `observation`: they do not park the
+replica during model reasoning and cannot authorize clicks or image inspection.
+An optional `after_request_id` proves that the selected image follows an applied
+action in the current authority incarnation. The direct response includes only
+bounded workflow headers; no replay frame, world attributes, recognized text or
+private path is returned. Pending HTTP 202 and exact expiry are explicit. Retain
+the complete request for retries; each deliberately new read gets a new identity.
+See [capture controls](../docs/capture-controls.md) for presentation options,
+headers, causal semantics, retention bounds and interactive-image compatibility.
+
+For a model host, the dependency-free image-returning MCP stdio adapter is:
+
+```sh
+python -m backend.capture_tools --origin http://127.0.0.1:8080 \
+  --token-file /var/lib/openttd/agent-1.token \
+  --artifacts /var/lib/openttd/agent-1-capture
+```
+
+It exposes `observe_world`, `observe_native_info`, `retry_observation`,
+`submit_action`, `retry_action`, `wait_action` and `act_and_observe`. Successful
+observations include actual MCP image blocks, rather than requiring the model
+to open a returned file. Optional local `observation_key` provides exact recovery
+when a whole tool reply is lost; repeat the same key and selection, or choose a
+new key for a new read. `act_and_observe` composes the existing action ledger with
+the chosen after-action image and preserves a completed receipt if capture
+fails. Its action journal is the shared `backend.player_actions.SavedActions`;
+exact retries never refresh handles or become new gameplay requests. `--audit`
+adds bounded HTTP/image-emission correlation; emission does not prove model
+receipt or understanding. See the same capture guide for precise tool arguments.
+
+For optional image-bound GUI input, use the original interaction screenshot:
 
 ```python
 frame = client.request("POST", "/v1/view/images", {})

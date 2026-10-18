@@ -581,6 +581,53 @@ void ShowCompanyFinances(CompanyID company)
 	new CompanyFinancesWindow(_company_finances_desc, company);
 }
 
+/** Prepare the ordinary local-company finances window for a native pixel capture. */
+Window *PrepareCompanyFinancesWindowForCapture(CompanyID company, bool compact)
+{
+	if (company != _local_company || !Company::IsValidID(company)) return nullptr;
+
+	auto *window = static_cast<CompanyFinancesWindow *>(FindWindowById(WindowClass::Finances, company));
+	if (window == nullptr) {
+		ShowCompanyFinances(company);
+		window = static_cast<CompanyFinancesWindow *>(FindWindowById(WindowClass::Finances, company));
+	}
+	window->ProcessScheduledInvalidations();
+
+	/* Refresh cached column visibility and widths before the first captured paint. */
+	window->first_visible = CompanyFinancesWindow::NUM_PERIODS - 1;
+	window->RefreshVisibleColumns();
+	const Company *c = Company::Get(company);
+	auto account_for_money = [](Money value) {
+		CompanyFinancesWindow::max_money = std::max(CompanyFinancesWindow::max_money, value < 0 ? -value : value);
+	};
+	account_for_money(c->money);
+	account_for_money(c->current_loan);
+	account_for_money(c->money - c->current_loan);
+	for (const Expenses &expenses : c->yearly_expenses) {
+		Money total = 0;
+		for (const ExpensesList &list : _expenses_list_types) {
+			Money subtotal = 0;
+			for (ExpensesType expense : list.items) {
+				account_for_money(expenses[expense]);
+				subtotal += expenses[expense];
+			}
+			account_for_money(subtotal);
+			total += subtotal;
+		}
+		account_for_money(total);
+	}
+
+	window->small = compact;
+	window->SetupWidgets();
+	if (window->IsShaded()) {
+		window->SetShaded(false);
+	} else {
+		window->ReInit();
+	}
+	BringWindowToFrontById(WindowClass::Finances, company);
+	return window;
+}
+
 /** Association of liveries to livery classes. */
 static const EnumIndexArray<LiveryClass, LiveryScheme, LiveryScheme::End> _livery_class = {
 	LiveryClass::Other,

@@ -1,9 +1,14 @@
 # Local world viewer
 
 Buildless HTML, CSS and browser JavaScript for the authenticated world service.
-There is no browser construction interface in this slice. The central view is a
-genuine native PNG; reports and inspection are native read-only view controls.
-Conversations continue independently when rendering is unavailable.
+The central view is a genuine native PNG. When advertised, Play mode supports
+screenshot-bound native clicks, left drags, Ctrl alternatives and text input
+through `ui.apply`, including construction with native tools. Reports and
+inspection use native read-only view controls. Conversations continue
+independently when rendering is unavailable. This PNG viewer is separate from
+the [native WebAssembly browser client](../os/emscripten/README.md#fixed-loopback-native-relay).
+The [capture contract](../docs/capture-controls.md) describes the shared typed
+actions and selected observation images available to external players.
 
 Serve these exact routes from the same origin as the API:
 
@@ -44,6 +49,10 @@ keeps it in tab memory only; it never places credentials in URLs or storage.
   A control is followed by a new capture. A shared run has one camera, so a
   different tab may invalidate the last frame; errors disable old targeting
   until a successful capture.
+- `POST /v1/actions` submits image-bound `ui.apply` gestures in Play or text
+  input mode. The viewer retains the original request ID and body for an
+  explicit retry and polls `/v1/actions/{request_id}` for its outcome.
+  Completion can be a UI-only effect; inspect a new image to confirm gameplay.
 - `GET/POST /v1/threads`, `GET/POST /v1/threads/{id}/messages`, and
   `POST /v1/mutes`, `/v1/blocks`, `/v1/reports` use the backend social DTOs.
   A sidebar Message button starts a direct company conversation. Native

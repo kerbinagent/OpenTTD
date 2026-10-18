@@ -17,6 +17,7 @@ from .catalog import CATALOG, action_spec, query_spec, validate_parameters, veri
 from .checkpoint import CheckpointPolicy
 from .errors import ServiceError
 from .json_tools import dumps
+from .observations import ObservationImage
 from . import projection
 from .social import Social
 
@@ -452,6 +453,12 @@ class Service:
             if estimate is not None:
                 result["action_estimate"] = estimate
             if connected:
+                if self.renderer and self.renderer.available(principal):
+                    try:
+                        result["selected_observations"] = self.renderer.observation_capabilities(principal)
+                    except (ServiceError, AttributeError):
+                        # Legacy renderers retain their interaction snapshots.
+                        pass
                 try:
                     _pause_from_hello(hello)
                 except ServiceError:
@@ -459,6 +466,18 @@ class Service:
                 else:
                     result["world_status"] = {"endpoint": "/v1/world/status", "event": "world.status"}
             return 200, result
+        if method == "POST" and route in (["view", "observe", "world"],
+                                           ["view", "observe", "native-info"]):
+            if query:
+                raise ServiceError("invalid_request")
+            if not self.renderer or not self.renderer.available(principal):
+                raise ServiceError("renderer_unavailable", status=503)
+            self._configure_renderer(principal)
+            kind = "world" if route[-1] == "world" else "native_info"
+            value = self.renderer.observe(
+                principal, kind, body,
+                lambda request_id: self._observation_barrier(principal, request_id))
+            return (200 if isinstance(value, ObservationImage) else 202), value
         if method == "POST" and route == ["view", "images"]:
             _object(body, {})
             if not self.renderer:
@@ -604,6 +623,46 @@ class Service:
         hello = self._hello(principal)
         if "native_max_lag_ticks" in hello:
             self.renderer.configure_authority(hello["engine_instance_id"], hello["native_max_lag_ticks"])
+
+    def _observation_barrier(self, principal, request_id):
+        """Resolve a private applied-frame fence without changing a saved action.
+
+        The receipt's public tick is not a renderer replay watermark. A status
+        lookup also handles actions completed through older event projections
+        that did not retain the ledger's execution frame.
+        """
+        hello = self._hello(principal, refresh=True)
+        instance = hello["engine_instance_id"]
+        if hello.get("recovery_required") is not False:
+            raise ServiceError("world_recovering", status=503)
+        self.renderer.configure_authority(instance, hello["native_max_lag_ticks"])
+        if request_id is None:
+            return instance, None
+        record = self.store.get_request(principal, request_id)
+        if record["status"] in ("accepted", "queued"):
+            self._wake.set()
+            return None
+        if record["status"] != "completed":
+            raise ServiceError("action_not_applied", status=409)
+        result = record.get("result") or {}
+        if not isinstance(result, dict):
+            raise ServiceError("causal_observation_unavailable", status=409)
+        if "executed_frame" not in result or "executed_boot_id" not in result:
+            self._bind(principal, hello)
+            reply = self._rpc("action.status", principal, request_id=request_id,
+                              request_sequence=record["request_sequence"],
+                              engine_instance_id=instance)
+            if (reply.get("status") != "completed" or
+                    reply.get("engine_instance_id", instance) != instance):
+                raise ServiceError("causal_observation_unavailable", status=409)
+            result = reply.get("result") or {}
+        if not isinstance(result, dict):
+            raise ServiceError("causal_observation_unavailable", status=409)
+        frame = result.get("executed_frame")
+        if (result.get("executed_boot_id") != instance or type(frame) is not int or
+                not 0 <= frame <= 2**32 - 1):
+            raise ServiceError("causal_observation_unavailable", status=409)
+        return instance, frame
 
     @staticmethod
     def _estimate_capability(principal):

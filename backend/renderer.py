@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
+import hashlib
 import json
 import math
 import os
@@ -17,6 +18,11 @@ import time
 import zlib
 
 from .errors import ServiceError
+from .json_tools import dumps
+from .observations import (
+    FUTURE_SKEW_MS, MAX_REQUESTS, RETENTION_MS, REQUEST_ID,
+    ObservationImage, capability, validate_request,
+)
 
 
 _IMAGE_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -48,6 +54,31 @@ class _Worker:
     latest: tuple | None = None  # image ID, capture time, width, height, source frame
     last_capture: float = float("-inf")
     controls: deque = field(default_factory=deque)
+    observation_generation: str = field(default_factory=lambda: secrets.token_hex(16))
+    observations: OrderedDict = field(default_factory=OrderedDict)
+    observation_revision: int | None = None
+    observation_version: int = 0
+
+
+@dataclass
+class _Observation:
+    fingerprint: str
+    request: dict
+    observation_id: str
+    deadline_ms: int
+    generation: str
+    instance: str
+    barrier: tuple | None = None
+    parameters: dict | None = None
+    image_id: str | None = None
+    width: int = 0
+    height: int = 0
+    source_frame: int | None = None
+    lifecycle_revision: int | None = None
+    capture_started: float | None = None
+    native_started: float | None = None
+    digest: str | None = None
+    error: tuple | None = None
 
 
 @dataclass(frozen=True)
@@ -131,7 +162,7 @@ class RendererGateway:
     def __init__(self, workers, world_id, world_epoch="initial", *,
                  max_cache_bytes=32 * 1024 * 1024, max_images=64, ttl=60,
                  capture_interval=1.0, max_managed_worker_keys=1024,
-                 clock=time.monotonic):
+                 clock=time.monotonic, wall_clock=time.time):
         if not isinstance(world_id, str) or not world_id or not isinstance(world_epoch, str) or not world_epoch:
             raise ValueError("world and epoch are required")
         if not isinstance(workers, dict) or not isinstance(max_cache_bytes, int) or max_cache_bytes < 1 or not isinstance(max_images, int) or max_images < 1 or ttl <= 0:
@@ -154,6 +185,10 @@ class RendererGateway:
         self.capture_interval = interval
         self.max_managed_worker_keys = max_managed_worker_keys
         self.clock = clock
+        self.wall_clock = wall_clock
+        self._observation_time_lock = threading.Lock()
+        self._observation_time_highwater = 0
+        self._observation_slots = threading.BoundedSemaphore(4)
         self._workers = {}
         self._cache = OrderedDict()
         self._cache_bytes = 0
@@ -274,7 +309,8 @@ class RendererGateway:
             raise ServiceError("forbidden", status=403)
         return dict(zip(_ACTOR_FIELDS, actor)), actor
 
-    def _rpc(self, worker, rpc_type, actor=None, *, allow_unknown=False, **fields):
+    def _rpc(self, worker, rpc_type, actor=None, *, allow_unknown=False,
+             observation=False, **fields):
         message = {"protocol_version": 1, "type": rpc_type,
                    "correlation_id": secrets.token_hex(16),
                    "world_id": self.world_id, "world_epoch": self.world_epoch}
@@ -301,6 +337,12 @@ class RendererGateway:
                 reply["error"].get("code") == "unknown_request" and
                 reply.get("result") == {}):
             return reply
+        if observation and reply.get("status") == "rejected":
+            error = reply.get("error")
+            code = error.get("code") if isinstance(error, dict) else None
+            if code in ("replica_pending", "renderer_busy", "rate_limited", "observation_expired",
+                        "observation_source_expired", "invalid_request"):
+                return reply
         if reply.get("status") not in ("completed", "ok"):
             self._clear_native_key(worker)
             raise _unavailable()
@@ -321,12 +363,18 @@ class RendererGateway:
             raise _unavailable()
         with self._cache_lock:
             if worker.instance != instance:
+                previous_instance = worker.instance
                 self._clear_native_key(worker)
                 self._drop_run_locked(worker)
                 worker.instance = instance
                 worker.bound_instance = None
                 worker.bound_authority = None
                 worker.latest = None
+                if previous_instance is not None:
+                    worker.observation_generation = secrets.token_hex(16)
+                    worker.observations.clear()
+                    worker.observation_revision = None
+        worker.observation_version = result.get("observation_version", 0)
         native_key = result.get("native_public_key")
         if isinstance(native_key, str) and _NATIVE_KEY.fullmatch(native_key):
             with self._cache_key_lock:
@@ -376,28 +424,42 @@ class RendererGateway:
             if entry.expires <= now:
                 self._remove(key)
 
-    def _cache_image(self, run_id, image_id, image, actor, instance, now):
+    def _cache_image(self, run_id, image_id, image, actor, instance, now, *, protect_input=False):
         if len(image) > self.max_cache_bytes:
             raise _unavailable()
         per_run_images = max(1, min(16, self.max_images))
         per_run_bytes = min(self.max_cache_bytes, _MAX_PNG * 2)
         with self._cache_lock:
             self._prune(now)
+            protected = ({(worker.run_id, worker.latest[0])
+                          for worker in self._workers.values()
+                          if worker.latest is not None and
+                          now - worker.latest[1] <= _MAX_LATEST_IMAGE_AGE}
+                         if protect_input else set())
             key = (run_id, image_id)
             if key in self._cache:
                 raise _unavailable()
             while self._cache and (sum(k[0] == run_id for k in self._cache) >= per_run_images or
                    sum(len(v.data) for k, v in self._cache.items() if k[0] == run_id) + len(image) > per_run_bytes or
                    len(self._cache) >= self.max_images or self._cache_bytes + len(image) > self.max_cache_bytes):
-                run_keys = [k for k in self._cache if k[0] == run_id]
-                victim = run_keys[0] if run_keys and (len(run_keys) >= per_run_images or
-                         sum(len(self._cache[k].data) for k in run_keys) + len(image) > per_run_bytes) else next(iter(self._cache))
+                run_keys = [k for k in self._cache if k[0] == run_id and k not in protected]
+                candidates = [k for k in self._cache if k not in protected]
+                if not candidates:
+                    raise _unavailable()
+                run_overflow = (sum(k[0] == run_id for k in self._cache) >= per_run_images or
+                                sum(len(v.data) for k, v in self._cache.items() if k[0] == run_id) +
+                                len(image) > per_run_bytes)
+                if run_overflow and not run_keys:
+                    raise _unavailable()
+                victim = run_keys[0] if run_overflow else candidates[0]
                 self._remove(victim)
             self._cache[key] = _Image(image, actor, instance, now + self.ttl)
             self._cache_bytes += len(image)
 
-    def _read_artifact(self, worker, path, image_id):
-        expected = worker.artifacts / ("frame-" + image_id + ".png")
+    def _read_artifact(self, worker, path, image_id, *, prefix="frame"):
+        if prefix not in ("frame", "observation"):
+            raise _unavailable()
+        expected = worker.artifacts / (prefix + "-" + image_id + ".png")
         if not isinstance(path, str) or Path(path) != expected:
             raise _unavailable()
         try:
@@ -477,8 +539,12 @@ class RendererGateway:
                     # The original image aged out or was evicted. A repeated
                     # native ID must never acquire a fresh gesture lifetime.
                     raise _unavailable()
-            self._cache_image(principal.run_id, image_id, data, actor_key, instance, now)
-            worker.latest = (image_id, now, width, height, source_frame)
+            # Publish the input image and its protection marker together.
+            # Another worker's observation may evict cache entries under this
+            # lock, so it must never see a new input image without `latest`.
+            with self._cache_lock:
+                self._cache_image(principal.run_id, image_id, data, actor_key, instance, now)
+                worker.latest = (image_id, now, width, height, source_frame)
             worker.last_capture = now
             return {"image_id": image_id, "width": width, "height": height}
 
@@ -494,6 +560,229 @@ class RendererGateway:
                 raise _image_unavailable()
             self._cache.move_to_end((principal.run_id, image_id))
             return entry.data
+
+    def observation_capabilities(self, principal):
+        worker = self._worker(principal)
+        if not worker.lock.acquire(blocking=False):
+            raise _unavailable()
+        try:
+            self._actor(principal, worker)
+            self._refresh(worker)
+            if type(worker.observation_version) is not int or worker.observation_version != 1:
+                raise _unavailable()
+            return capability(worker.observation_generation)
+        finally:
+            worker.lock.release()
+
+    def _observation_wall_ms(self):
+        # A clock correction cannot revive an expired identity in this gateway.
+        with self._observation_time_lock:
+            self._observation_time_highwater = max(
+                self._observation_time_highwater, int(self.wall_clock() * 1000))
+            return self._observation_time_highwater
+
+    @staticmethod
+    def _pending_observation(request_id, reason):
+        return {"status": "pending", "observation_request_id": request_id,
+                "reason": reason, "retry_after_ms": 100}
+
+    def _observation_record(self, principal, worker, request, fingerprint):
+        actor, actor_key = self._actor(principal, worker)
+        instance = self._refresh(worker)
+        if type(worker.observation_version) is not int or worker.observation_version != 1:
+            raise _unavailable()
+        now_ms = self._observation_wall_ms()
+        issued_ms = int(REQUEST_ID.fullmatch(request["observation_request_id"]).group(1))
+        if (request["observation_generation"] != worker.observation_generation or
+                now_ms >= issued_ms + RETENTION_MS):
+            raise ServiceError("observation_expired", status=410)
+        if issued_ms > now_ms + FUTURE_SKEW_MS:
+            raise ServiceError("invalid_request", "Observation clock is ahead of the server")
+        for key, entry in list(worker.observations.items()):
+            if entry.deadline_ms <= now_ms:
+                del worker.observations[key]
+        request_id = request["observation_request_id"]
+        record = worker.observations.get(request_id)
+        if record is None:
+            if len(worker.observations) >= MAX_REQUESTS:
+                return actor, actor_key, None
+            record = _Observation(fingerprint, request, secrets.token_hex(16),
+                                  issued_ms + RETENTION_MS,
+                                  worker.observation_generation, instance)
+            worker.observations[request_id] = record
+        elif record.fingerprint != fingerprint:
+            raise ServiceError("observation_id_conflict", status=409)
+        return actor, actor_key, record
+
+    def _observation_result(self, principal, worker, record, actor_key, kind, *, reused):
+        with self._cache_lock:
+            self._prune(self.clock())
+            entry = self._cache.get((principal.run_id, record.image_id))
+            if (entry is None or entry.actor != actor_key or
+                    entry.instance != record.instance):
+                # Keep the request fingerprint until its timestamp expires.
+                # Eviction must never turn an exact retry into another render.
+                raise ServiceError("observation_expired", status=410)
+            data = entry.data
+        return ObservationImage(
+            data=data, observation_id=record.observation_id,
+            image_id=record.image_id, generation=record.generation,
+            kind=kind, width=record.width, height=record.height,
+            causal_state="satisfied" if "after_request_id" in record.request else "none",
+            reused=reused, age_ms=max(0, int((self.clock() - record.capture_started) * 1000)),
+        )
+
+    def _observation_parameters(self, worker, record, kind):
+        request = record.request
+        if kind == "world":
+            selection = dict(request["selection"])
+            if selection["kind"] == "map_image_point":
+                source_id = selection.pop("observation_id")
+                source = next((value for value in worker.observations.values()
+                               if value.observation_id == source_id), None)
+                if (source is None or source.image_id is None or source.error is not None or
+                        "selection" not in source.request or
+                        source.generation != record.generation or
+                        source.instance != record.instance or
+                        source.lifecycle_revision != worker.observation_revision or
+                        source.deadline_ms <= self._observation_wall_ms()):
+                    raise ServiceError("observation_expired", status=410)
+                pixel = selection["pixel"]
+                if pixel["x"] >= source.width or pixel["y"] >= source.height:
+                    raise ServiceError("invalid_request")
+                with self._cache_lock:
+                    self._prune(self.clock())
+                    if (worker.run_id, source.image_id) not in self._cache:
+                        raise ServiceError("observation_expired", status=410)
+                selection["image_id"] = source.image_id
+            params = {"selection": selection, "output": request["output"],
+                      "labels": request["labels"]}
+        else:
+            params = {"panel": request["panel"], "presentation": request["presentation"],
+                      "region": request["region"]}
+        params["observation_request_id"] = record.observation_id
+        params["authority_instance_id"] = record.barrier[0]
+        if record.barrier[1] is not None:
+            params["minimum_source_frame"] = record.barrier[1]
+        return params
+
+    def _render_observation(self, principal, worker, record, actor, actor_key, kind):
+        if (record.native_started is not None and
+                self.clock() - record.native_started >= RETENTION_MS / 1000):
+            # Future clock skew must not extend an uncertain native token past
+            # its own deduplication lifetime and accidentally draw it again.
+            record.error = ("observation_expired", 410)
+            raise ServiceError("observation_expired", status=410)
+        if record.parameters is None:
+            record.parameters = self._observation_parameters(worker, record, kind)
+        self._bind(worker, actor, record.instance)
+        if record.capture_started is None:
+            record.capture_started = self.clock()
+        if record.native_started is None:
+            record.native_started = self.clock()
+        reply = self._rpc(worker, "observation." + kind, actor,
+                          observation=True, engine_instance_id=record.instance,
+                          parameters=record.parameters)
+        if reply.get("status") == "rejected":
+            code = reply["error"]["code"]
+            if code in ("replica_pending", "renderer_busy", "rate_limited"):
+                record.capture_started = None
+                return code
+            code, status = (("invalid_request", 400) if code == "invalid_request"
+                            else ("observation_expired", 410))
+            record.error = (code, status)
+            raise ServiceError(code, status=status)
+        result = reply.get("result")
+        required = {"image_id", "path", "width", "height", "content_type", "source_frame",
+                    "authority_instance_id", "world_epoch", "worker_instance_id",
+                    "renderer_lifecycle_revision", "capture_kind"}
+        if (not isinstance(result, dict) or not required <= set(result) or
+                not isinstance(result["image_id"], str) or not _IMAGE_ID.fullmatch(result["image_id"]) or
+                result["content_type"] != "image/png" or result["capture_kind"] != kind or
+                result["world_epoch"] != self.world_epoch or
+                result["worker_instance_id"] != record.instance or
+                result["authority_instance_id"] != record.barrier[0] or
+                not _bounded_int(result["source_frame"], 0, 2**32 - 1) or
+                record.barrier[1] is not None and result["source_frame"] < record.barrier[1] or
+                not _bounded_int(result["renderer_lifecycle_revision"], 0, 2**64 - 1) or
+                not _bounded_int(result["width"], 1, 1280) or
+                not _bounded_int(result["height"], 1, 1024) or
+                result["width"] * result["height"] > 1048576):
+            raise _unavailable()
+        if kind == "world" and (result["width"], result["height"]) != (
+                record.request["output"]["width"], record.request["output"]["height"]):
+            raise _unavailable()
+        data = self._read_artifact(worker, result["path"], result["image_id"], prefix="observation")
+        try:
+            dimensions = _png_dimensions(data)
+        except (ValueError, zlib.error):
+            raise _unavailable() from None
+        if dimensions != (result["width"], result["height"]):
+            raise _unavailable()
+        self._cache_image(principal.run_id, result["image_id"], data, actor_key,
+                          record.instance, self.clock(), protect_input=True)
+        record.image_id = result["image_id"]
+        record.width, record.height = dimensions
+        record.source_frame = result["source_frame"]
+        record.lifecycle_revision = result["renderer_lifecycle_revision"]
+        record.digest = hashlib.sha256(data).hexdigest()
+        worker.observation_revision = record.lifecycle_revision
+        return self._observation_result(principal, worker, record, actor_key, kind, reused=False)
+
+    def observe(self, principal, kind, body, resolve_barrier):
+        """Return immutable observation pixels without acquiring an input lease.
+
+        Retry admission is bounded by the timestamp in the caller's identity.
+        Waiting happens between IPC attempts, with the worker lock released so
+        native replay and independently admitted actions can make progress.
+        """
+        request = validate_request(kind, body)
+        worker = self._worker(principal)
+        fingerprint = hashlib.sha256((kind + "\n" + dumps(body)).encode("utf-8")).hexdigest()
+        request_id = request["observation_request_id"]
+        if not self._observation_slots.acquire(blocking=False):
+            return self._pending_observation(request_id, "renderer_busy")
+        deadline = time.monotonic() + request["wait_ms"] / 1000
+        resolved_barrier = None
+        try:
+            while True:
+                reason, needs_barrier, record = "renderer_busy", False, None
+                if worker.lock.acquire(blocking=False):
+                    try:
+                        actor, actor_key, record = self._observation_record(
+                            principal, worker, request, fingerprint)
+                        if record is not None:
+                            if record.error is not None:
+                                raise ServiceError(record.error[0], status=record.error[1])
+                            if record.image_id is not None:
+                                return self._observation_result(
+                                    principal, worker, record, actor_key, kind, reused=True)
+                            if record.barrier is None:
+                                if resolved_barrier is None:
+                                    needs_barrier = True
+                                else:
+                                    record.barrier = resolved_barrier
+                            if record.barrier is not None:
+                                value = self._render_observation(
+                                    principal, worker, record, actor, actor_key, kind)
+                                if isinstance(value, ObservationImage):
+                                    return value
+                                reason = value
+                    finally:
+                        worker.lock.release()
+                if needs_barrier:
+                    barrier = resolve_barrier(request.get("after_request_id"))
+                    if barrier is not None:
+                        resolved_barrier = barrier
+                        # The first render attempt is allowed even with wait_ms=0.
+                        continue
+                    reason = "action_pending"
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return self._pending_observation(request_id, reason)
+                time.sleep(min(0.1, remaining))
+        finally:
+            self._observation_slots.release()
 
     def control(self, principal, body):
         worker = self._worker(principal)

@@ -38,6 +38,11 @@ void RendererEndOwnedCommand();
  */
 Json RendererControl(const Json &params);
 Json RendererCapture(const Json &params);
+/** Read-only, nonparked observation artifacts; never usable as screenshot/input proofs. */
+Json RendererObserveWorld(const Json &params);
+Json RendererObserveNativeInfo(const Json &params);
+/** Reset the one-new-observation-work-item budget at the start of private IPC Tick. */
+void RendererBeginObservationTick();
 Json RendererUICapture(const Json &params);
 Json RendererUIStatus(const Json &params);
 Json RendererUIRelease(const Json &params);

@@ -273,6 +273,10 @@ Json EntryReply(const Json &request, const LedgerEntry &entry)
 	result["request_sequence"] = entry.identity.request_sequence;
 	result["checkpoint_state"] = entry.checkpoint_committed ? "checkpointed" : "uncheckpointed";
 	result["executed_boot_id"] = entry.executed_boot_id;
+	/* Private causal evidence for a renderer which has replayed this command.
+	 * The reply envelope's current tick is not the command's execution frame. */
+	result["executed_frame"] = entry.executed_frame;
+	result["executed_tick"] = entry.executed_tick;
 	Json reply = Reply(request, Lifecycle(entry.state), std::move(result));
 	if (entry.state == RequestState::Rejected && entry.outcome.contains("error")) reply["error"] = entry.outcome.at("error");
 	return reply;
@@ -591,13 +595,14 @@ Json Handle(const Json &request)
 			{"capabilities", std::move(capabilities)}, {"native_max_lag_ticks", _settings_client.network.max_lag_time}, {"baseline_hash", std::string(_openttd_revision_hash)},
 			{"recovery_required", s.ledger ? s.ledger->RecoveryRequired() : false}, {"pause", pause_available ? ObservePauseStatus() : Json()}};
 		if (RendererIsActive()) {
+			result["observation_version"] = 1;
 			const NetworkClientInfo *native = _networking && !_network_server && MyClient::IsConnected() ? NetworkClientInfo::GetByClientID(_network_own_client_id) : nullptr;
 			result["native_public_key"] = native == nullptr ? "" : native->public_key;
 		}
 		return Reply(request, "completed", std::move(result));
 	}
 	if (request.value("engine_instance_id", std::string()) != s.instance) return Reply(request, "rejected", {}, "engine_fence");
-	if (visual && type != "session.bind" && type != "view.control" && type != "window.open" && type != "image.request" && type != "control.reference" && type != "action.estimate" && type != "action.submit" && type != "action.status" && type != "ui.capture" && type != "ui.status" && type != "ui.release" && type != "recovery.reconcile" && type != "recovery.resolve") return Reply(request, "rejected", {}, "mode_restricted");
+	if (visual && type != "session.bind" && type != "view.control" && type != "window.open" && type != "image.request" && type != "observation.world" && type != "observation.native_info" && type != "control.reference" && type != "action.estimate" && type != "action.submit" && type != "action.status" && type != "ui.capture" && type != "ui.status" && type != "ui.release" && type != "recovery.reconcile" && type != "recovery.resolve") return Reply(request, "rejected", {}, "mode_restricted");
 	if (type == "catalog.describe") {
 		if (RendererIsActive() || request.contains("actor")) return Reply(request, "rejected", {}, "catalog_operator_only");
 		if (!ValidString(request.at("name"), 128) || !request.at("kind").is_string()) return Reply(request, "rejected", {}, "invalid_catalog_request");
@@ -630,7 +635,7 @@ Json Handle(const Json &request)
 		return Reply(request, "completed", {{"bound", true}});
 	}
 	if (RendererIsActive()) {
-		if (type != "view.control" && type != "window.open" && type != "image.request" && type != "ui.capture" && type != "ui.status" && type != "ui.release") return Reply(request, "rejected", {}, "renderer_read_only");
+		if (type != "view.control" && type != "window.open" && type != "image.request" && type != "observation.world" && type != "observation.native_info" && type != "ui.capture" && type != "ui.status" && type != "ui.release") return Reply(request, "rejected", {}, "renderer_read_only");
 		Json actor = ReadActor(request);
 		if (!Bound(actor)) return Reply(request, "rejected", {}, "session_unbound");
 		Json parameters = request.value("parameters", Json::object());
@@ -639,6 +644,8 @@ Json Handle(const Json &request)
 		if (type == "ui.capture") result = RendererUICapture(parameters);
 		else if (type == "ui.status") result = RendererUIStatus(parameters);
 		else if (type == "ui.release") result = RendererUIRelease(parameters);
+		else if (type == "observation.world") result = RendererObserveWorld(parameters);
+		else if (type == "observation.native_info") result = RendererObserveNativeInfo(parameters);
 		else result = type == "image.request" ? RendererCapture(parameters) : RendererControl(parameters);
 		return result.contains("error") ? Reply(request, "rejected", {}, result.at("error").at("code").get<std::string>().c_str()) : Reply(request, "completed", std::move(result));
 	}
@@ -1041,6 +1048,7 @@ void Tick()
 	Initialize();
 	auto &s = GetState();
 	if (!s.configured) return;
+	RendererBeginObservationTick();
 	ObservePauseStatus();
 	ReconcileLoaded();
 	if (s.company_creation && Company::IsValidID(CompanyID(*s.company_creation))) s.company_creation.reset();

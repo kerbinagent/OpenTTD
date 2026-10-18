@@ -15,6 +15,206 @@ structured world observations. Inspect the command outcome; accepted and queued
 acknowledgements do not establish success. Structured world
 readers remain text-only. Public chat and participant metadata remain available.
 
+## Selected map and native-panel observations
+
+When `GET /v1/capabilities` includes `selected_observations`, a configured,
+version-matched renderer supports two additional read routes:
+
+| Route | Native image selected by the caller |
+| --- | --- |
+| `POST /v1/view/observe/world` | Map-only viewport with a chosen center, absolute zoom, output size and native label switches |
+| `POST /v1/view/observe/native-info` | Own-company finance window or the town directory, with the supported native presentation options |
+
+These images have purpose `observation`. Drawing and copying the pixels does not
+leave the replica parked while the model reasons. They provide neither a UI
+input lease nor an inspection proof: their IDs cannot be passed to `ui.apply`,
+view controls or image-bound inspection. For those operations, obtain and inspect
+an interaction screenshot through the existing `/v1/view/images` route. Selected
+observations do not cancel an active interaction lease. A map request may render
+the already replayed frame; a panel request returns pending/busy while the leased
+desktop is in use. An after-action requirement can also remain pending until
+replay is allowed to advance.
+
+The reference client prepares the bounded request identity and returns PNG bytes
+directly:
+
+```python
+from backend.observations import ObservationImage
+
+request = client.new_observation_request("world", {
+    "selection": {"kind": "map_center", "tile": {"x": 64, "y": 64},
+                  "zoom_level": "normal"},
+    "output": {"width": 800, "height": 600},
+    "labels": {"town_names": True, "station_names": False},
+})
+# Retain this complete body before sending if a lost reply must be recoverable.
+result = client.observe_world(request)
+if isinstance(result, ObservationImage):
+    png = result.data
+else:
+    # HTTP 202 workflow status: wait, then resend the identical request.
+    pending = result
+```
+
+The example center is only a presentation choice. It does not identify a viable
+business site. A map selection is either `map_center` with tile coordinates, or
+`map_image_point` with an owned, retained world `observation_id`, an image
+`pixel: {"x": ..., "y": ...}`, and a `zoom_level`. The latter centers a new
+native view on that earlier image point; it returns no resolved world
+coordinates or object attributes. It cannot use an interaction screenshot or a
+native-panel image as its source.
+
+Absolute zoom names are `in4x`, `in2x`, `normal`, `out2x`, `out4x`, and `out8x`.
+Output width is 64–1280 and height 64–1024, subject to at most 1,048,576 output
+pixels and 134,217,728 native virtual pixels. The virtual-area bound can reject
+a large, far-zoomed view even when its output pixel count fits. Label fields are
+Booleans: `town_names` and `station_names` default to true; `waypoint_names`,
+`signs`, and `competitor_labels` default to false. These switches choose native
+rendering. They do not return label text, recognized text or hidden map data.
+
+Native-panel parameters are closed and currently limited to:
+
+```json
+{"panel":"company_finances","target":{"kind":"self"},
+ "presentation":{"layout":"expanded"},"region":"window"}
+```
+
+```json
+{"panel":"town_directory",
+ "presentation":{"sort":{"by":"population","direction":"descending"},
+                 "scroll":{"first_row":0}},"region":"window"}
+```
+
+Finance layout is `compact` or `expanded` (the default); only the acting company
+is supported. Town sort is `name` (the default), `population`, or `rating`, with
+`ascending` (the default) or `descending` direction; `first_row` defaults to zero
+and accepts 0–65535. The native window clamps scrolling to its available rows.
+`region` accepts only `window`. These are genuine native window pixels with
+native layout and dimensions, not a reconstructed report. Selection never
+activates loan or other gameplay controls. Other information windows and
+arbitrary crops are outside this interface.
+
+### Direct image delivery and exact read retries
+
+Each successful selected-observation POST returns HTTP 200, `Content-Type:
+image/png` and `Cache-Control: no-store`. No image GET is required. The permitted
+workflow headers are:
+
+| Header after `X-OpenTTD-` | Meaning |
+| --- | --- |
+| `Observation-Id`, `Image-Id`, `Observation-Generation` | Opaque observation, immutable image and retry-context identities |
+| `Capture-Kind` | `world` or `native_info` |
+| `Image-Width`, `Image-Height` | Returned pixel dimensions |
+| `Causal-State` | `none`, or `satisfied` for a proved after-action condition |
+| `Image-Reused` | Whether this response reuses the completed observation |
+| `Image-Age-Ms` | Elapsed time since capture began, including capture work |
+| `Image-Purpose` | Always `observation` |
+
+The PNG has no metadata chunks. Private artifact paths, replay frames, authority
+boot IDs, viewport transforms and panel state are not public response fields.
+
+Every wire request includes `observation_generation` from the capability and
+`observation_request_id` of the form `obs1:<13-digit Unix milliseconds>:<32
+lowercase hex digits>`. The client generates these fields. `wait_ms` defaults to
+1500 and accepts 0–2000. A request ID binds the exact original body and route;
+reusing that ID with a changed body or route returns `409
+observation_id_conflict`. A new ID identifies a new read. Retrying a completed
+request returns the same immutable pixels, with updated age and reuse metadata.
+
+The retry deadline is 60 seconds from the ID's timestamp, not 60 seconds from
+each attempt. The server permits at most 5000 ms of future clock skew and uses a
+nondecreasing clock bound for expiry. A backend restart or detected renderer
+incarnation change rotates the generation. Expired context, source image or
+result returns `410 observation_expired`; an exact retry never silently draws a
+replacement. Start a new read deliberately when a current picture is needed.
+`client.reset_observation_context()` refreshes capability bootstrap for that new
+read and does not rewrite a saved request.
+
+There are at most 64 unexpired request records per renderer run. Admission at
+that bound is temporary; records expire rather than forming a lifetime quota.
+PNG retention can be shorter: the shared cache defaults to 60 seconds, 64 images
+and 32 MiB globally, with at most 16 images and 32 MiB per run. Cache eviction
+therefore can make an exact retry expire before its request deadline. The
+request fingerprint remains until the deadline, preventing a later redraw under
+the same identity. Owned source-image navigation has the same retention and
+lifecycle checks.
+
+When work cannot complete within `wait_ms`, HTTP 202 returns only `status:
+"pending"`, `observation_request_id`, `reason`, and `retry_after_ms`. Reasons are
+`action_pending`, `replica_pending`, `renderer_busy`, or `rate_limited`. Honor the
+retry delay and keep the identical body. Capture generation has bounded
+admission separate from command/chat work; pending, overload and expiry are
+workflow outcomes, not evidence of a game-state change.
+
+### Observe after an applied action
+
+Add `after_request_id` to request the selected image after one of the run's
+completed actions. The backend resolves the existing action ledger's private
+execution frame and authority boot, waits for that same authority's renderer to
+catch up, then draws the requested presentation. Waiting occurs outside the
+native game thread. `causal_state: "satisfied"` means that this selected image
+was drawn after the action's application. It does not promise that another
+company or the simulation has not changed the result again.
+
+Accepted or queued actions return pending. Rejected, uncertain or rolled-back
+actions are not visually confirmed (`409 action_not_applied`). Missing or
+incomparable execution evidence, including an authority restart, can return
+`409 causal_observation_unavailable`; recovery can return `503
+world_recovering`. A public receipt's tick is not a replay watermark. The
+observation never changes a saved action or retries it under a new ID.
+
+### Model-facing image tools
+
+Configure a model host's MCP stdio transport to launch:
+
+```sh
+python -m backend.capture_tools --origin http://127.0.0.1:8080 \
+  --token-file /var/lib/openttd/agent-1.token \
+  --artifacts /var/lib/openttd/agent-1-capture
+```
+
+The dependency-free adapter negotiates MCP `2025-11-25`, keeps protocol messages
+on stdout, and accesses only the authenticated public API. Successful
+`observe_world` and `observe_native_info` calls return an actual PNG image block
+alongside finite workflow metadata. Their arguments are the presentation fields
+above, plus optional `after_request_id`, `wait_ms` and `observation_key`; the
+adapter manages wire generation and timestamp identities. Capability bootstrap
+is one initial HTTP read; each successful observation is then one POST with no
+image GET or separate image-opening tool call.
+
+Use an optional caller-chosen `observation_key` when the entire tool reply might
+be lost. Repeating that key with the same normalized selection and after-action
+condition loads the original saved request, including after adapter restart.
+Changing the selection under an existing key is rejected. A key is local to the
+adapter and never sent as a public selector. An expired key stays expired; choose
+a new key for a new read. Without a key, each observe call is a new read. When its
+reply is available, `retry_observation(observation_request_id)` retries the saved
+body directly.
+
+`submit_action(request)` saves a canonical typed action before sending it;
+`retry_action(request_id)` reloads its exact original body, references and
+version tokens. Both use the shared `SavedActions` journal. `wait_action` accepts
+a bounded 0–20000 ms wait, defaulting to 20000. A new intentional command gets a
+new action ID. A completed receipt recovered by an exact replay describes the
+original execution, not the current state of its targets.
+
+`act_and_observe` accepts `request`, an `observation` object with `kind` (`world`
+or `native_info`) and `parameters`, and an optional action `wait_ms` (0–20000).
+It submits that saved action, waits, then sets the observation's
+`after_request_id` to the action ID. Only a completed action proceeds to capture.
+The tool returns the known action receipt even if observation later fails or
+remains pending. Continue the observation with its saved identity; capture
+failure is not a reason to invent another gameplay request.
+
+`--audit` records bounded public request and delivery metadata, including HTTP
+attempt IDs, tool-call correlation, image digest/bytes and an emission marker.
+Successful image emission proves the adapter wrote an image block to its
+transport. It does not prove host receipt, model perception or understanding.
+Measure HTTP attempts, model tool turns, actual image inputs, native captures,
+pixels and latency separately. This interface alone establishes no latency
+threshold or autonomous business success; runtime acceptance belongs in the
+[validation ledger](integration_validation.md).
+
 ## Road access
 
 These construction rules apply to typed actions in both text and capture modes.

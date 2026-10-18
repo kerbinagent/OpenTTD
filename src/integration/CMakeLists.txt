@@ -30,6 +30,8 @@ add_files(
     renderer.h
     renderer_image.cpp
     renderer_image.h
+    renderer_observation.cpp
+    renderer_observation.h
     renderer_input.cpp
     renderer_input.h
     visual_commands.cpp

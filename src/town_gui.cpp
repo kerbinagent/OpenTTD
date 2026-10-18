@@ -987,6 +987,27 @@ public:
 		}
 	}
 
+	/** Apply an absolute native directory view before capturing its pixels. */
+	void PrepareForCapture(uint8_t criterion, bool descending, uint32_t first_row)
+	{
+		this->ProcessScheduledInvalidations();
+		this->townname_editbox.text.DeleteAll();
+		this->string_filter.SetFilterTerm({});
+		this->last_sorting = {descending, criterion};
+		this->towns.SetListing(this->last_sorting);
+		this->towns.ForceRebuild();
+		this->BuildSortTownList();
+
+		/* Rebuild first so both name widths and scrollbar capacity use current towns. */
+		if (this->IsShaded()) {
+			this->SetShaded(false);
+		} else {
+			this->ReInit();
+		}
+		this->vscroll->SetPosition(ClampTo<Scrollbar::size_type>(first_row));
+		this->SetDirty();
+	}
+
 	void OnPaint() override
 	{
 		if (this->towns.NeedRebuild()) this->BuildSortTownList();
@@ -1061,6 +1082,22 @@ void ShowTownDirectory()
 {
 	if (BringWindowToFrontById(WindowClass::TownDirectory, 0)) return;
 	new TownDirectoryWindow(_town_directory_desc);
+}
+
+/** Prepare the ordinary town directory for a native pixel capture. */
+Window *PrepareTownDirectoryWindowForCapture(uint8_t criterion, bool descending, uint32_t first_row)
+{
+	/* The native directory offers name, population and rating criteria. */
+	if (criterion > 2) return nullptr;
+
+	auto *window = static_cast<TownDirectoryWindow *>(FindWindowById(WindowClass::TownDirectory, 0));
+	if (window == nullptr) {
+		ShowTownDirectory();
+		window = static_cast<TownDirectoryWindow *>(FindWindowById(WindowClass::TownDirectory, 0));
+	}
+	window->PrepareForCapture(criterion, descending, first_row);
+	BringWindowToFrontById(WindowClass::TownDirectory, 0);
+	return window;
 }
 
 void CcFoundTown(Commands, const CommandCost &result, TileIndex tile)

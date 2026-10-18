@@ -1,8 +1,17 @@
 # Screenshot-bound action broker: implementation and review
 
+Scope note (2026-10-18): this is the design history of the optional
+screenshot-bound `ui.apply` route. Its original GUI-only assumptions are
+superseded by the [current capture contract](../docs/capture-controls.md): visual
+players may submit the same typed gameplay actions and explicit actuator
+selectors as text players while perceiving the world through native images.
+Selected observation-purpose images have no input lease; the lifecycle below
+continues to apply to interaction screenshots. The current capture guide and
+public schema also cover the later text and named-control gestures.
+
 Status: the bounded one-command/empty-bundle backend and C++ path is implemented. This document records its reviewed authority boundary and remaining acceptance limits; full native helper parity, broader mixed-world recovery and measured workload acceptance remain separate from the verified public HTTP transport-mode checks.
 
-Public request keeps the existing envelope: `{request_id, action:{name:"ui.apply", parameters:{image_id,gesture:"click"|"drag"|"move",x,y,end_x?,end_y?,button?}}}`. The authenticated immutable visual run supplies company, mode and world; callers cannot supply object IDs, map coordinates, native commands, worker paths or intent bundles. Coordinates are bounded pixels in that run's latest image. Move accepts exactly `image_id,gesture,x,y` and updates ordinary native hover/tooltips; click and drag carry the normal button/endpoint rules. A click may select a normal GUI tool/window, and a later screenshot-bound gesture applies it. The engine continues to enforce normal costs, ownership and ordering.
+The screenshot-bound request keeps the existing envelope: `{request_id, action:{name:"ui.apply", parameters:{image_id,gesture:"click"|"drag"|"move",x,y,end_x?,end_y?,button?}}}`. The authenticated immutable visual run supplies company, mode and world; this route accepts neither object IDs, map coordinates, native commands, worker paths nor intent bundles. Coordinates are bounded pixels in that run's latest interaction image. Move accepts exactly `image_id,gesture,x,y` and updates ordinary native hover/tooltips; click and drag carry the normal button/endpoint rules. A click may select a normal GUI tool/window, and a later screenshot-bound gesture applies it. The engine continues to enforce normal costs, ownership and ordering.
 
 The worker is a company-scoped trusted replica, parked at the authoritative source frame before ordinary native UI input is processed. Its command-post hook captures the native intent instead of executing/sending it independently. Read-only controls and screenshot capture remain separate; no planner, hidden lookup, semantic map or OCR endpoint is added.
 
@@ -34,7 +43,7 @@ The first slice is one command or an empty bundle. The native renderer blocks au
 
 ## Alternatives and complexity
 
-Raw tile/object action parameters for visual credentials violate observation isolation; rejected. Re-running the click on every retry duplicates world actions or clicks a different later UI; rejected. Encoding a bundle in the public action result leaks native IDs/coordinates; rejected. A separate visual workflow service or durable queue duplicates the existing action ledger; rejected. The existing row's capture marker, worker fence, immutable bundle and UI cleanup state preserve the engine/backend authority split.
+The original proposal rejected typed tile/object action parameters for visual credentials. That assumption is superseded: the shared typed-action interface accepts explicit targets and coordinates while keeping structured world observation text-only. The `ui.apply` route itself remains screenshot-bound. Re-running the click on every retry duplicates world actions or clicks a different later UI; rejected. Encoding a bundle in the public action result leaks native IDs/coordinates; rejected. A separate visual workflow service or durable queue duplicates the existing action ledger; rejected. The existing row's capture marker, worker fence, immutable bundle and UI cleanup state preserve the engine/backend authority split.
 
 The C++ implementation defines `ui.capture`, `ui.status`, `ui.release`, bundle size/keys, source-frame lease, owner binding and native dedupe identity. Backend conformance checks those shapes before persistence. Public click/drag/move pixels and left/right click are explicitly validated; drag is left-button only, and move has no button or endpoint. There is no arbitrary keyboard/script input. The configurable capture interval is 1–60 seconds (default 1) and limits new native captures, not fresh simulation frames: native parking can preserve one frame for roughly eight seconds. Reusing a valid image during the interval does not extend image expiry or gesture age; a control may have to wait before another native capture.
 

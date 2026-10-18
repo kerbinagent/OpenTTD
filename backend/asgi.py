@@ -20,15 +20,18 @@ from starlette.routing import Route
 
 from .errors import ServiceError
 from .http import (
-    HEARTBEAT_INTERVAL, MAX_BODY, MAX_IMAGE, MAX_TARGET, STREAM_LIFETIME,
-    _EVENT_FIELD, _IMAGE_PATH, _PNG_SIGNATURE, _STATIC, _WEB_ROOT, read_static,
+    CAPTURE_SLOTS, HEARTBEAT_INTERVAL, MAX_BODY, MAX_IMAGE, MAX_TARGET, STREAM_LIFETIME,
+    _EVENT_FIELD, _IMAGE_PATH, _PNG_SIGNATURE, _STATIC, _WEB_ROOT,
+    _capture_path, _observation_headers, read_static,
 )
 from .json_tools import dumps, loads
+from .observations import ObservationImage
 
 
 API_SLOTS = 64
 IMAGE_SLOTS = 64
 IMAGE_LOOKUP_THREADS = 8
+CAPTURE_THREADS = 8
 STREAM_SLOTS = 64
 BODY_TIMEOUT = 10.0
 SEND_TIMEOUT = 5.0
@@ -79,6 +82,27 @@ class _TimedResponse:
                 pass
         finally:
             await self.slots.release()
+
+
+async def _capture_call(service: object, args: tuple, threads: anyio.CapacityLimiter):
+    """Keep capture capacity reserved until a cancelled request's worker exits."""
+    worker = asyncio.create_task(to_thread.run_sync(service.handle, *args, limiter=threads))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Raw asyncio cancellation can otherwise abandon an AnyIO worker and
+        # release its limiter while the synchronous capture is still running.
+        with anyio.CancelScope(shield=True):
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+        if not worker.cancelled():
+            worker.exception()
+        raise
 
 
 def _json_response(status: int, payload: dict) -> Response:
@@ -261,9 +285,11 @@ def create_app(service: object, web_root=None) -> Starlette:
     assets = {path: read_static(path, root) for path in _STATIC}
     api_slots = _Admission(API_SLOTS)
     image_slots = _Admission(IMAGE_SLOTS)
+    capture_slots = _Admission(CAPTURE_SLOTS)
     stream_slots = _Admission(STREAM_SLOTS)
     api_threads = anyio.CapacityLimiter(API_SLOTS)
     image_threads = anyio.CapacityLimiter(IMAGE_LOOKUP_THREADS)
+    capture_threads = anyio.CapacityLimiter(CAPTURE_THREADS)
     stream_threads = anyio.CapacityLimiter(STREAM_SLOTS)
 
     async def dispatch(request: Request):
@@ -309,16 +335,37 @@ def create_app(service: object, web_root=None) -> Starlette:
                 })
                 slots = None
                 return _TimedResponse(response, image_slots)
-            if not await api_slots.acquire():
+            capture_path = _capture_path(path)
+            capture = request.method == "POST" and capture_path is not None
+            slots = capture_slots if capture else api_slots
+            if not await slots.acquire():
+                slots = None
+                if capture:
+                    raise _Problem(503, "captures_busy", "Too many capture requests")
                 raise _Problem(503, "server_busy", "Too many requests")
-            slots = api_slots
             body = await _body(request)
-            status, payload = await to_thread.run_sync(
-                service.handle, request.method, path, token, body, query, limiter=api_threads,
-            )
-            response = _json_response(status, payload)
+            args = (request.method, path, token, body, query)
+            if capture:
+                status, payload = await _capture_call(service, args, capture_threads)
+            else:
+                status, payload = await to_thread.run_sync(service.handle, *args, limiter=api_threads)
+            if isinstance(payload, ObservationImage):
+                if status != 200 or request.method != "POST":
+                    raise _Problem(500, "image_unavailable", "Image unavailable")
+                try:
+                    headers = _observation_headers(payload, capture_path or path)
+                except (TypeError, ValueError):
+                    raise _Problem(500, "image_unavailable", "Image unavailable") from None
+                response = Response(payload.data, headers={
+                    "Content-Type": "image/png", "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
+                    **headers,
+                })
+            else:
+                response = _json_response(status, payload)
+            response_slots = slots
             slots = None
-            return _TimedResponse(response, api_slots)
+            return _TimedResponse(response, response_slots)
         except _Problem as exc:
             response = _error(exc.status, exc.code, exc.message)
         except ServiceError as exc:
@@ -340,5 +387,7 @@ def create_app(service: object, web_root=None) -> Starlette:
     app.state.api_threads = api_threads
     app.state.image_slots = image_slots
     app.state.image_lookup_threads = image_threads
+    app.state.capture_slots = capture_slots
+    app.state.capture_threads = capture_threads
     app.state.stream_slots = stream_slots
     return app
