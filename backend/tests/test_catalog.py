@@ -15,7 +15,7 @@ class CatalogTest(unittest.TestCase):
     def test_compact_engine_capabilities_match_catalog_identity(self):
         self.assertEqual(CATALOG_HASH_ALGORITHM, "blake2b-256")
         self.assertEqual(CATALOG_HASH,
-                         "083a13031161b652d3892f756d1dc5a097f8b1991383174a075ce2fa09ff85a3")
+                         "aabfc928e2ad99625d0a061ee5bcc7382d0ebdf4772f53901d55cd012d9cd757")
         capabilities = {key: copy.deepcopy(value) for key, value in CATALOG.items()
                         if key not in ("actions", "queries")}
         capabilities.update(actions=list(CATALOG_ACTION_NAMES), queries=list(CATALOG_QUERY_NAMES),

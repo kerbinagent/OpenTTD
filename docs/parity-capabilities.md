@@ -32,7 +32,7 @@ normal availability, ownership, funds and construction rules still decide it.
 
 | Human outcome | Implemented actions and choices | Permissions and semantic limits |
 | --- | --- | --- |
-| Road/tram construction, conversion, stops, depots and waypoints | `road.build`, `road.pieces.build`, `road.remove`, `road.convert`, `road.depot.build`, `road.stop.build/remove`, `road.waypoint.build/remove`; explicit road bits/direction toggles, road type, stop dimensions and catalogued class/spec | Native road ownership and drive-through orientation apply. A direction toggle is not a desired-state setter. Waypoint removal can retain its road. |
+| Road/tram construction, conversion, stops, depots and waypoints | `road.build`, `road.pieces.build`, `road.remove`, `road.convert`, `road.depot.build`, `road.stop.build/remove`, `road.waypoint.build/remove`; explicit road bits/direction toggles, road type, stop dimensions and catalogued class/spec | Native road ownership and drive-through orientation apply. A direction toggle is not a desired-state setter. Waypoint removal can retain its road. Typed depot/stop commands require explicit access-road composition; see [road access](capture-controls.md#road-access). |
 | Railway construction, stations, waypoints and signals | `rail.build/remove`, `rail.build_line/remove_line`, `rail.convert`, `rail.depot.build`, `rail.station.build/remove`, `rail.waypoint.build/remove`, `rail.signal.build/remove`; track/type, station dimensions/join, class/spec, signal type/variant/direction/conversion | Native selected-spec availability, station spread, ownership and signal rules apply. Larger geometry and signal-density work can compose smaller operations. |
 | Water/air infrastructure, bridges and tunnels | `water.depot.build`, `water.dock.build`, `water.buoy.build`, `water.lock.build`, `water.canal.build`, `airport.build/open_close`, `bridge.build`, `tunnel.build`; airport layout, bridge and transport/type choices | Native terrain and ownership checks remain final. Ordinary demolition uses `terrain.clear`. Sea/river creation remains editor-only. |
 | Terrain, trees and normal objects | `terrain.raise/lower/level/clear/plant_tree`, `object.build`; corners, tree species, object type/view | HQ relocation and purchased land use normal object types. Object footprints include native linked effects and old HQ dependencies. Scenario-only objects and direct statue construction are unavailable; statues use `town.action`. |
@@ -153,7 +153,7 @@ Approval of those designs is not proof of implementation correctness or gameplay
 acceptance. Central registry/schema/target integration and backend projections
 remain separate review responsibilities.
 
-The latest validated native snapshot has SHA-256
+The latest native gameplay-suite snapshot has SHA-256
 `1c5a2eaa11b4443e70a2d231f4e8f78d8765e4e4aef52588aac02772f28c9f43`.
 Its actual catalog contains 104 actions / 60 queries with BLAKE2b-256
 `083a13031161b652d3892f756d1dc5a097f8b1991383174a075ce2fa09ff85a3`.
@@ -163,6 +163,13 @@ recorded pause/news build attribution. Technical checks establish their tested
 interfaces; they do not establish successful autonomous businesses or release
 closure. Detailed evidence is in the
 [validation record](integration_validation.md#expanded-acceptance-criteria).
+
+A subsequent descriptive-only road-access build (`4e26eb85…`) adds two catalog
+conventions and the [shared road guide](capture-controls.md#road-access). Its
+actual 104-action/60-query export has BLAKE2b-256
+`aabfc928e2ad99625d0a061ee5bcc7382d0ebdf4772f53901d55cd012d9cd757`;
+all other catalog content is unchanged. The build, actual export and 277 backend
+tests passed. Native gameplay suites retain the preceding binary attribution.
 
 The earlier validated `bd6fa099…` native snapshot has an actual 104-action/56-query
 catalog with BLAKE2b-256

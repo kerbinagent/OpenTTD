@@ -15,6 +15,56 @@ structured world observations. Inspect the command outcome; accepted and queued
 acknowledgements do not establish success. Structured world
 readers remain text-only. Public chat and participant metadata remain available.
 
+## Road access
+
+These construction rules apply to typed actions in both text and capture modes.
+Compass directions refer to the screen diagonals. A road depot or terminal/bay
+stop's `direction` selects its entrance neighbor, rather than the position of a
+nearby road or the center of its sprite:
+
+| `direction` | Entrance neighbor relative to the structure | Reciprocal road bit needed on that neighbor |
+| --- | --- | --- |
+| `0` / NE | `x−1, y` | SW / `2` |
+| `1` / SE | `x, y+1` | NW / `1` |
+| `2` / SW | `x+1, y` | NE / `8` |
+| `3` / NW | `x, y−1` | SE / `4` |
+
+Road-bit masks are NW=`1`, SW=`2`, SE=`4`, NE=`8`; combine needed bits by adding
+their masks. For an illustrative depot at `(10,20)` with direction `0`, its
+entrance is at `(9,20)`, where the reciprocal bit is `2`. These coordinates are
+an example, not a suitable site or a promised feasible construction. Matching
+bits are necessary access geometry; native slope, road-type, ownership and other
+rules still apply, and a complete traversable route must exist beyond them.
+
+With `drive_through: true`, a road stop's typed `direction` instead selects its
+axis: `0` or `2` selects X, along changing x coordinates, with road bits `10`;
+`1` or `3` selects Y, along changing y coordinates, with road bits `5`. A
+through stop must match its straight road alignment. Typed directions remain
+`0..3`; the optional native UI picker's through-stop ordinals `4/5` are different
+values used only by that picker.
+
+Typed `road.depot.build` and `road.stop.build` construct the structure without
+running the GUI's automatic neighbor-road connection. The normal native GUI
+can submit a separate follow-up command to add the missing reciprocal bit when
+the entrance neighbor is already a normal road tile with road/tram bits. That
+callback does not choose the correct facing or build access across empty land.
+The optional captured UI route blocks gameplay-producing follow-up callbacks.
+Use `road.pieces.build` for an exact needed mask, or compose other ordinary road
+commands. `road.build` derives its line axis from its endpoint coordinates;
+identical endpoints select X, so a same-tile line build does not select an
+arbitrary entrance connector. Each intended construction step has its own
+request identity, native cost and outcome; retry an uncertain step with its
+original saved request. Multiple steps can partially complete.
+
+A successful construction receipt establishes that the facility was built.
+A vehicle heading and positive displayed speed do not establish that it has
+reached the road or a destination: it can turn around within an isolated depot
+tile. Occupying a depot tile also differs from the native `in_depot` state.
+Verify actual travel and arrival/loading or delivery and transport income.
+Text players can inspect direction and road bits through existing `map.region`
+observations; capture players inspect genuine PNGs and native facility/tile
+windows, following the same image-only perception contract.
+
 ## One selected actuator reference
 
 `POST /v1/control/reference` resolves one explicit target to the current
