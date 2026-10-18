@@ -69,3 +69,30 @@ budget or cutoff changed. The original URL-only unaided interpretation gate is
 therefore **qualified**, even if later business operation succeeds. Guide/schema
 wording is being corrected for subsequent fresh sessions; this trial retains its
 original frozen assets and the assistance record.
+
+## Thirty-minute checkpoint
+
+The scheduled cycle at 16:54:44 UTC produced four paired, non-atomic native
+reports. All 244 scheduled reads through that round succeeded, with no runtime
+restart. Retained quarterly transport totals were:
+
+| Company | Transport income | Delivered cargo units |
+| --- | ---: | ---: |
+| 0, text competitor | 784 | 326 |
+| 1, capture competitor | 0 | 0 |
+| 2, text cooperator | 2,736 | 1,249 |
+| 3, capture cooperator | 0 | 0 |
+
+These are native accounting units, not net profit or exact simultaneous cutoff
+totals. Baseline transport income was zero. Both capture players reported working
+interfaces; reachability and an empty service remained business problems under
+investigation. No route repair or strategic assistance was supplied.
+
+A finite operator-only read also checked an existing direct-company thread for
+companies 0/1: outsider company 2 was denied with `404 thread_unavailable`.
+No private message bodies were retained by that test. An initial test assumption
+of 403 was corrected to the API's deliberate 404 concealment. This checks that
+one API path; broader native/UI isolation is not inferred from it.
+
+Evidence: `progress-30min.json` and `private-thread-isolation.json` under the
+local evidence root. The trial continues toward its original maximum cutoff.
