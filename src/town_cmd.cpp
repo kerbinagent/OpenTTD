@@ -720,7 +720,7 @@ static CommandCost ClearTile_Town(TileIndex tile, DoCommandFlags flags)
 }
 
 /** @copydoc AddProducedCargoProc */
-static void AddProducedCargo_Town(TileIndex tile, CargoArray &produced)
+static void AddProducedCargoOfHouse(TileIndex tile, CargoArray &produced, IndustryPresentationPsaOverlay *presentation_psa)
 {
 	HouseID house_id = GetHouseType(tile);
 	const HouseSpec *hs = HouseSpec::Get(house_id);
@@ -728,7 +728,7 @@ static void AddProducedCargo_Town(TileIndex tile, CargoArray &produced)
 
 	if (hs->callback_mask.Test(HouseCallbackMask::ProduceCargo)) {
 		for (uint i = 0; i < 256; i++) {
-			uint16_t callback = GetHouseCallback(CBID_HOUSE_PRODUCE_CARGO, i, 0, house_id, t, tile);
+			uint16_t callback = GetHouseCallback(CBID_HOUSE_PRODUCE_CARGO, i, 0, house_id, t, tile, {}, false, 0, {}, 0, presentation_psa);
 
 			if (callback == CALLBACK_FAILED || callback == CALLBACK_HOUSEPRODCARGO_END) break;
 
@@ -749,6 +749,16 @@ static void AddProducedCargo_Town(TileIndex tile, CargoArray &produced)
 			}
 		}
 	}
+}
+
+static void AddProducedCargo_Town(TileIndex tile, CargoArray &produced)
+{
+	AddProducedCargoOfHouse(tile, produced, nullptr);
+}
+
+void AddProducedCargoOfHouseForObservation(TileIndex tile, CargoArray &produced, IndustryPresentationPsaOverlay &presentation_psa)
+{
+	AddProducedCargoOfHouse(tile, produced, &presentation_psa);
 }
 
 /**
@@ -774,7 +784,7 @@ static void AddAcceptedCargoSetMask(CargoType cargo, uint amount, CargoArray &ac
  * @param[out] acceptance CargoArray to be filled with acceptance information.
  * @param[out] always_accepted Bitmask of always accepted cargo types
  */
-void AddAcceptedCargoOfHouse(TileIndex tile, HouseID house, const HouseSpec *hs, Town *t, CargoArray &acceptance, CargoTypes &always_accepted)
+void AddAcceptedCargoOfHouse(TileIndex tile, HouseID house, const HouseSpec *hs, Town *t, CargoArray &acceptance, CargoTypes &always_accepted, IndustryPresentationPsaOverlay *presentation_psa = nullptr)
 {
 	CargoType accepts[lengthof(hs->accepts_cargo)];
 
@@ -785,7 +795,7 @@ void AddAcceptedCargoOfHouse(TileIndex tile, HouseID house, const HouseSpec *hs,
 
 	/* Check for custom accepted cargo types */
 	if (hs->callback_mask.Test(HouseCallbackMask::AcceptCargo)) {
-		uint16_t callback = GetHouseCallback(CBID_HOUSE_ACCEPT_CARGO, 0, 0, house, t, tile, {}, tile == INVALID_TILE);
+		uint16_t callback = GetHouseCallback(CBID_HOUSE_ACCEPT_CARGO, 0, 0, house, t, tile, {}, tile == INVALID_TILE, 0, {}, 0, presentation_psa);
 		if (callback != CALLBACK_FAILED) {
 			/* Replace accepted cargo types with translated values from callback */
 			accepts[0] = GetCargoTranslation(GB(callback,  0, 5), hs->grf_prop.grffile);
@@ -796,7 +806,7 @@ void AddAcceptedCargoOfHouse(TileIndex tile, HouseID house, const HouseSpec *hs,
 
 	/* Check for custom cargo acceptance */
 	if (hs->callback_mask.Test(HouseCallbackMask::CargoAcceptance)) {
-		uint16_t callback = GetHouseCallback(CBID_HOUSE_CARGO_ACCEPTANCE, 0, 0, house, t, tile, {}, tile == INVALID_TILE);
+		uint16_t callback = GetHouseCallback(CBID_HOUSE_CARGO_ACCEPTANCE, 0, 0, house, t, tile, {}, tile == INVALID_TILE, 0, {}, 0, presentation_psa);
 		if (callback != CALLBACK_FAILED) {
 			AddAcceptedCargoSetMask(accepts[0], GB(callback, 0, 4), acceptance, always_accepted);
 			AddAcceptedCargoSetMask(accepts[1], GB(callback, 4, 4), acceptance, always_accepted);
@@ -821,6 +831,12 @@ static void AddAcceptedCargo_Town(TileIndex tile, CargoArray &acceptance, CargoT
 {
 	HouseID house = GetHouseType(tile);
 	AddAcceptedCargoOfHouse(tile, house, HouseSpec::Get(house), Town::GetByTile(tile), acceptance, always_accepted);
+}
+
+void AddAcceptedCargoOfHouseForObservation(TileIndex tile, CargoArray &acceptance, CargoTypes &always_accepted, IndustryPresentationPsaOverlay &presentation_psa)
+{
+	HouseID house = GetHouseType(tile);
+	AddAcceptedCargoOfHouse(tile, house, HouseSpec::Get(house), Town::GetByTile(tile), acceptance, always_accepted, &presentation_psa);
 }
 
 /**

@@ -18,6 +18,22 @@
 #include "station_type.h"
 #include "engine_type.h"
 #include "company_type.h"
+#include "gfx_type.h"
+
+/** Native vehicle-view status precedence, shared with read-only reports. */
+enum class VehicleStatusKind : uint8_t {
+	Crashed, BrokenDown, Stopping, NoPower, Stopped, WaitingUnbunching, TrainStuck,
+	DestinationTooFar, CannotReachStation, HeadingToStation, CannotReachDepot, HeadingToDepot,
+	CannotReachWaypoint, HeadingToWaypoint, LoadingUnloading, Leaving, NoOrders, Other,
+};
+
+struct VehicleStatusInfo {
+	VehicleStatusKind kind = VehicleStatusKind::Other;
+	std::string text;
+	ExtendedTextColour text_colour{TextColour::Black};
+};
+
+VehicleStatusInfo GetVehicleStatusInfo(const Vehicle *v, bool mouse_over_start_stop = false);
 
 void ShowVehicleRefitWindow(const Vehicle *v, VehicleOrderID order, Window *parent, bool auto_refit = false);
 

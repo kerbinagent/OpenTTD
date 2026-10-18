@@ -1,0 +1,8 @@
+class ServiceError(Exception):
+    """A safe, client-facing failure with a stable machine-readable code."""
+
+    def __init__(self, code: str, message: str = "Request rejected", status: int = 400):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status = status

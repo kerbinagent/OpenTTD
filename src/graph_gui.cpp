@@ -177,9 +177,6 @@ protected:
 	static constexpr PixelColour GRAPH_ZERO_LINE_COLOUR =  GREY_SCALE(8);
 	static constexpr PixelColour GRAPH_YEAR_LINE_COLOUR =  GREY_SCALE(5);
 	static const int GRAPH_NUM_MONTHS       =  24; ///< Number of months displayed in the graph.
-	static const int GRAPH_PAYMENT_RATE_STEPS = 20; ///< Number of steps on Payment rate graph.
-	static const int PAYMENT_GRAPH_X_STEP_DAYS    = 10; ///< X-axis step label for cargo payment rates "Days in transit".
-	static const int PAYMENT_GRAPH_X_STEP_SECONDS = 20; ///< X-axis step label for cargo payment rates "Seconds in transit".
 	static const int ECONOMY_YEAR_MINUTES = 12;  ///< Minutes per economic year.
 	static const int ECONOMY_QUARTER_MINUTES = 3;  ///< Minutes per economic quarter.
 	static const int ECONOMY_MONTH_MINUTES = 1;  ///< Minutes per economic month.
@@ -1394,13 +1391,13 @@ struct PaymentRatesGraphWindow : BaseCargoGraphWindow {
 
 	PaymentRatesGraphWindow(WindowDesc &desc, WindowNumber window_number) : BaseCargoGraphWindow(desc, STR_JUST_CURRENCY_SHORT)
 	{
-		this->num_on_x_axis = GRAPH_PAYMENT_RATE_STEPS;
-		this->num_vert_lines = GRAPH_PAYMENT_RATE_STEPS;
+		this->num_on_x_axis = CargoPaymentRatesGraph::SAMPLE_COUNT;
+		this->num_vert_lines = CargoPaymentRatesGraph::SAMPLE_COUNT;
 		this->draw_dates = false;
 
 		this->x_values_reversed = false;
 		/* The x-axis is labeled in either seconds or days. A day is two seconds, so we adjust the label if needed. */
-		this->x_values_increment = (TimerGameEconomy::UsingWallclockUnits() ? PAYMENT_GRAPH_X_STEP_SECONDS : PAYMENT_GRAPH_X_STEP_DAYS);
+		this->x_values_increment = (TimerGameEconomy::UsingWallclockUnits() ? CargoPaymentRatesGraph::DISPLAY_SECOND_STEP : CargoPaymentRatesGraph::DISPLAY_DAY_STEP);
 
 		this->InitializeWindow(window_number, STR_GRAPH_CARGO_PAYMENT_RATES_SECONDS, STR_GRAPH_CARGO_PAYMENT_RATES_DAYS);
 	}
@@ -1447,7 +1444,8 @@ struct PaymentRatesGraphWindow : BaseCargoGraphWindow {
 			dataset.exclude_bit = cs->Index();
 
 			for (uint j = 0; j != this->num_on_x_axis; j++) {
-				dataset.values[j] = GetTransportedGoodsIncome(10, 20, j * 4 + 4, cs->Index());
+				dataset.values[j] = GetTransportedGoodsIncome(CargoPaymentRatesGraph::AMOUNT, CargoPaymentRatesGraph::DISTANCE_TILES,
+					(j + 1) * CargoPaymentRatesGraph::TRANSIT_PERIOD_STEP, cs->Index());
 			}
 		}
 	}

@@ -52,6 +52,11 @@
 #include "../water_cmd.h"
 #include "../waypoint_cmd.h"
 #include "../script/script_cmd.h"
+#ifdef WITH_INTEGRATION
+#include "../integration/bridge_hooks.h"
+#include "../integration/renderer.h"
+#include "../integration/visual_commands.h"
+#endif
 
 #include "../safeguards.h"
 
@@ -181,6 +186,11 @@ static constexpr auto _cmd_dispatch = MakeDispatchTable(std::make_integer_sequen
 static CommandQueue _local_wait_queue;
 /** Local queue of packets waiting for execution. */
 static CommandQueue _local_execution_queue;
+#ifdef WITH_INTEGRATION
+/** Separate bounded company queues; agents do not share the operator's larger allowance. */
+static std::array<CommandQueue, MAX_COMPANIES> _integration_wait_queues;
+static uint _integration_next_company = 0;
+#endif
 
 
 /**
@@ -197,6 +207,61 @@ static size_t FindCallbackIndex(CommandCallback *callback)
 	return std::numeric_limits<size_t>::max();
 }
 
+#ifdef WITH_INTEGRATION
+namespace Integration {
+
+size_t PendingLocalCommands()
+{
+	return _local_wait_queue.size() + _local_execution_queue.size();
+}
+
+std::optional<uint8_t> NativeCallbackIndex(Commands command, CommandCallback *callback)
+{
+	if (!IsValidCommand(command)) return std::nullopt;
+	size_t index = FindCallbackIndex(callback);
+	if (index >= _callback_table.size() || _cmd_dispatch[command].Unpack[index] == nullptr) return std::nullopt;
+	return static_cast<uint8_t>(index);
+}
+
+bool NormalizeNativeCommand(Commands command, uint8_t callback, CommandDataBuffer &data, ClientID owner)
+{
+	if (!IsValidCommand(command) || callback >= _callback_table.size() || _cmd_dispatch[command].Unpack[callback] == nullptr ||
+			data.size() > 16384 || owner == ClientID::Invalid) return false;
+	try {
+		CommandPacket packet;
+		packet.cmd = command;
+		packet.data = _cmd_dispatch[command].Sanitize(data);
+		_cmd_dispatch[command].ReplaceClientId(packet, owner);
+		data = std::move(packet.data);
+		return data.size() <= 16384;
+	} catch (const std::exception &) {
+		return false;
+	}
+}
+
+bool QueueVisualNativeCommand(Commands command, StringID error, uint8_t callback, CompanyID company,
+		const CommandDataBuffer &data, ClientID owner, uint64_t token)
+{
+	if (!_network_server || token == 0 || company.base() >= MAX_COMPANIES) return false;
+	auto &queue = _integration_wait_queues[company.base()];
+	if (queue.size() >= 128) return false;
+	CommandPacket packet;
+	packet.cmd = command;
+	packet.err_msg = error;
+	packet.company = company;
+	packet.data = data;
+	if (!NormalizeNativeCommand(command, callback, packet.data, owner)) return false;
+	packet.callback = _callback_table[callback];
+	packet.integration_token = token;
+	packet.integration_owner = owner;
+	queue.push_back(std::move(packet));
+	CommandQueued(token);
+	return true;
+}
+
+} // namespace Integration
+#endif
+
 /**
  * Prepare a DoCommand to be send over the network
  * @param cmd The command to execute (a CMD_* value)
@@ -207,12 +272,28 @@ static size_t FindCallbackIndex(CommandCallback *callback)
  */
 void NetworkSendCommand(Commands cmd, StringID err_message, CommandCallback *callback, CompanyID company, const CommandDataBuffer &cmd_data)
 {
+#ifdef WITH_INTEGRATION
+	if (Integration::RendererCaptureCommandIntent(cmd, err_message, company, cmd_data)) return;
+#endif
 	CommandPacket c;
 	c.company  = company;
 	c.cmd      = cmd;
 	c.err_msg  = err_message;
 	c.callback = callback;
 	c.data     = cmd_data;
+
+#ifdef WITH_INTEGRATION
+	if (_network_server && Integration::SubmissionToken() != 0) {
+		if (company.base() >= MAX_COMPANIES) return;
+		auto &queue = _integration_wait_queues[company.base()];
+		if (queue.size() >= 128) return;
+		c.integration_token = Integration::SubmissionToken();
+		c.my_cmd = false;
+		queue.push_back(std::move(c));
+		Integration::CommandQueued(Integration::SubmissionToken());
+		return;
+	}
+#endif
 
 	if (_network_server) {
 		/* If we are the server, we queue the command in our 'special' queue.
@@ -273,11 +354,27 @@ void NetworkExecuteLocalCommandQueue()
 		}
 
 		/* We can execute this command */
+#ifdef WITH_INTEGRATION
+		if (!_network_server && Integration::RendererIsActive()) {
+			auto *client = ClientNetworkGameSocketHandler::my_client;
+			client->renderer_queued_bytes -= std::min(client->renderer_queued_bytes, cp->data.size());
+		}
+#endif
 		_current_company = cp->company;
+#ifdef WITH_INTEGRATION
+		Integration::BeginCommand(cp->integration_token);
+#endif
 		size_t cb_index = FindCallbackIndex(cp->callback);
 		assert(cb_index < _callback_tuple_size);
 		assert(_cmd_dispatch[cp->cmd].Unpack[cb_index] != nullptr);
+#ifdef WITH_INTEGRATION
+		Integration::RendererBeginOwnedCommand(cp->cmd, cp->data, cp->my_cmd, static_cast<uint8_t>(cb_index));
+#endif
 		_cmd_dispatch[cp->cmd].Unpack[cb_index](*cp);
+#ifdef WITH_INTEGRATION
+		Integration::RendererEndOwnedCommand();
+		Integration::EndCommand();
+#endif
 	}
 	queue.erase(queue.begin(), cp);
 
@@ -292,6 +389,9 @@ void NetworkFreeLocalCommandQueue()
 {
 	_local_wait_queue.clear();
 	_local_execution_queue.clear();
+#ifdef WITH_INTEGRATION
+	for (auto &queue : _integration_wait_queues) queue.clear();
+#endif
 }
 
 /**
@@ -357,6 +457,24 @@ static void DistributeQueue(CommandQueue &queue, const NetworkClientSocket *owne
 /** Distribute the commands of ourself and the clients. */
 void NetworkDistributeCommands()
 {
+#ifdef WITH_INTEGRATION
+	/* At frame_freq=0, publish one revalidated agent command first, then native commands.
+	 * This makes generation checks apply before the same command is replayed everywhere. */
+	for (uint checked = 0; checked < MAX_COMPANIES; checked++) {
+		uint company = _integration_next_company++ % MAX_COMPANIES;
+		auto &queue = _integration_wait_queues[company];
+		if (queue.empty()) continue;
+		CommandPacket command = std::move(queue.front());
+		queue.erase(queue.begin());
+		if (Integration::ValidateQueuedCommand(command.integration_token)) {
+			NetworkClientSocket *owner = command.integration_owner == ClientID::Invalid ? nullptr : NetworkClientSocket::GetByClientID(command.integration_owner);
+			/* Validation and distribution run without yielding the simulation thread. */
+			assert(command.integration_owner == ClientID::Invalid || owner != nullptr);
+			if (command.integration_owner == ClientID::Invalid || owner != nullptr) DistributeCommandPacket(command, owner);
+		}
+		break;
+	}
+#endif
 	/* First send the server's commands. */
 	DistributeQueue(_local_wait_queue, nullptr);
 

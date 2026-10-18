@@ -1321,6 +1321,9 @@ bool RequestNewGRFScan(NewGRFScanCallback *callback)
 
 void GameLoop()
 {
+#ifdef WITH_INTEGRATION
+	Integration::Tick();
+#endif
 	if (_game_mode == GameMode::Bootstrap) {
 		/* Check for UDP stuff */
 		if (_network_available) NetworkBackgroundLoop();

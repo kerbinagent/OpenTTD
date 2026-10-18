@@ -32,6 +32,7 @@ EncodedString GetSaveLoadErrorType();
 EncodedString GetSaveLoadErrorMessage();
 SaveLoadResult SaveOrLoad(std::string_view filename, SaveLoadOperation fop, DetailedFileType dft, Subdirectory sb, bool threaded = true);
 void WaitTillSaved();
+bool IsSaveInProgress();
 void ProcessAsyncSaveFinish();
 void DoExitSave();
 

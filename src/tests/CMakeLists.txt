@@ -2,6 +2,7 @@ add_test_files(
     alternating_iterator.cpp
     bitmath_func.cpp
     enum_over_optimisation.cpp
+    test_pool_generation.cpp
     flatset_type.cpp
     history_func.cpp
     landscape_partial_pixel_z.cpp
@@ -21,3 +22,26 @@ add_test_files(
     tilearea.cpp
     utf8.cpp
 )
+
+if(OPTION_INTEGRATION)
+    add_test_files(
+        test_integration_ledger.cpp
+        test_integration_visual_targets.cpp
+        test_integration_construction.cpp
+        test_integration_management.cpp
+        test_integration_company_settings_registry.cpp
+        test_integration_company_settings_gui.cpp
+        test_integration_decisions.cpp
+        test_integration_story.cpp
+        test_integration_story_startup.cpp
+        test_integration_reports.cpp
+        test_integration_quota.cpp
+        test_integration_terraform.cpp
+        test_integration_estimate.cpp
+        test_integration_display_text.cpp
+        test_integration_refit_subtypes.cpp
+        test_integration_station_waiting.cpp
+        test_newgrf_industry_observation_overlay.cpp
+        test_integration_question_window.cpp
+    )
+endif()

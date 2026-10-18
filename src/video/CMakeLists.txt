@@ -1,6 +1,9 @@
 add_subdirectory(cocoa)
 
 if(NOT OPTION_DEDICATED)
+    if(OPTION_INTEGRATION)
+        add_files(framebuffer_v.cpp framebuffer_v.h)
+    endif()
     add_files(
         allegro_v.cpp
         allegro_v.h

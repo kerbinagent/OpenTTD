@@ -49,6 +49,10 @@
 #include "hotkeys.h"
 #include "graph_gui.h"
 
+#ifdef WITH_INTEGRATION
+#include "integration/renderer_input.h"
+#endif
+
 #include "widgets/town_widget.h"
 
 #include "table/strings.h"
@@ -1344,6 +1348,16 @@ public:
 		this->UpdateButtons(true);
 	}
 };
+
+#ifdef WITH_INTEGRATION
+QueryString *Integration::RendererFoundTownNameQuery(Window *window)
+{
+	if (_game_mode != GameMode::Normal || !Company::IsValidID(_local_company) || window == nullptr ||
+			window->window_class != WindowClass::FoundTown || window->window_number != 0 ||
+			dynamic_cast<FoundTownWindow *>(window) == nullptr) return nullptr;
+	return window->GetQueryString(WID_TF_TOWN_NAME_EDITBOX);
+}
+#endif
 
 /** Window definition for the town funding window. */
 static WindowDesc _found_town_desc(

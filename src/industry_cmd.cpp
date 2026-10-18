@@ -411,7 +411,7 @@ static Foundation GetFoundation_Industry(TileIndex tile, Slope tileh)
 }
 
 /** @copydoc AddAcceptedCargoProc */
-static void AddAcceptedCargo_Industry(TileIndex tile, CargoArray &acceptance, CargoTypes &always_accepted)
+static void AddAcceptedCargoOfIndustry(TileIndex tile, CargoArray &acceptance, CargoTypes &always_accepted, IndustryPresentationPsaOverlay *presentation_psa)
 {
 	IndustryGfx gfx = GetIndustryGfx(tile);
 	const IndustryTileSpec *itspec = GetIndustryTileSpec(gfx);
@@ -437,7 +437,7 @@ static void AddAcceptedCargo_Industry(TileIndex tile, CargoArray &acceptance, Ca
 
 	if (itspec->callback_mask.Test(IndustryTileCallbackMask::AcceptCargo)) {
 		/* Try callback for accepts list, if success override all existing accepts */
-		uint16_t res = GetIndustryTileCallback(CBID_INDTILE_ACCEPT_CARGO, 0, 0, gfx, Industry::GetByTile(tile), tile);
+		uint16_t res = GetIndustryTileCallback(CBID_INDTILE_ACCEPT_CARGO, 0, 0, gfx, Industry::GetByTile(tile), tile, {}, presentation_psa);
 		if (res != CALLBACK_FAILED) {
 			accepts_cargo.fill(INVALID_CARGO);
 			for (uint i = 0; i < INDUSTRY_ORIGINAL_NUM_INPUTS; i++) accepts_cargo[i] = GetCargoTranslation(GB(res, i * 5, 5), itspec->grf_prop.grffile);
@@ -446,7 +446,7 @@ static void AddAcceptedCargo_Industry(TileIndex tile, CargoArray &acceptance, Ca
 
 	if (itspec->callback_mask.Test(IndustryTileCallbackMask::CargoAcceptance)) {
 		/* Try callback for acceptance list, if success override all existing acceptance */
-		uint16_t res = GetIndustryTileCallback(CBID_INDTILE_CARGO_ACCEPTANCE, 0, 0, gfx, Industry::GetByTile(tile), tile);
+		uint16_t res = GetIndustryTileCallback(CBID_INDTILE_CARGO_ACCEPTANCE, 0, 0, gfx, Industry::GetByTile(tile), tile, {}, presentation_psa);
 		if (res != CALLBACK_FAILED) {
 			cargo_acceptance.fill(0);
 			for (uint i = 0; i < INDUSTRY_ORIGINAL_NUM_INPUTS; i++) cargo_acceptance[i] = GB(res, i * 4, 4);
@@ -469,6 +469,16 @@ static void AddAcceptedCargo_Industry(TileIndex tile, CargoArray &acceptance, Ca
 		/* If the industry itself doesn't accept this cargo, set 'always accepted' bit */
 		always_accepted.Set(cargo);
 	}
+}
+
+static void AddAcceptedCargo_Industry(TileIndex tile, CargoArray &acceptance, CargoTypes &always_accepted)
+{
+	AddAcceptedCargoOfIndustry(tile, acceptance, always_accepted, nullptr);
+}
+
+void AddAcceptedCargoOfIndustryForObservation(TileIndex tile, CargoArray &acceptance, CargoTypes &always_accepted, IndustryPresentationPsaOverlay &presentation_psa)
+{
+	AddAcceptedCargoOfIndustry(tile, acceptance, always_accepted, &presentation_psa);
 }
 
 /** @copydoc GetTileDescProc */

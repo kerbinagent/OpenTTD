@@ -13,6 +13,8 @@
 #include "town_type.h"
 #include "newgrf_spritegroup.h"
 
+struct IndustryPresentationPsaOverlay;
+
 /**
  * Scope resolver for a town.
  * @note Currently there is no direct town resolver; we only need to get town
@@ -22,6 +24,7 @@
 struct TownScopeResolver : public ScopeResolver {
 	Town *t;       ///< %Town of the scope.
 	bool readonly; ///< When set, persistent storage of the town is read-only,
+	IndustryPresentationPsaOverlay *presentation_psa = nullptr; ///< Query-local industry-view PSA overlay, if any.
 
 	/**
 	 * Resolver of a town scope.
@@ -29,8 +32,8 @@ struct TownScopeResolver : public ScopeResolver {
 	 * @param t %Town of the scope.
 	 * @param readonly Scope may change persistent storage of the town.
 	 */
-	TownScopeResolver(ResolverObject &ro, Town *t, bool readonly)
-		: ScopeResolver(ro), t(t), readonly(readonly)
+	TownScopeResolver(ResolverObject &ro, Town *t, bool readonly, IndustryPresentationPsaOverlay *presentation_psa = nullptr)
+		: ScopeResolver(ro), t(t), readonly(readonly), presentation_psa(presentation_psa)
 	{
 	}
 

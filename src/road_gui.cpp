@@ -47,6 +47,10 @@
 
 #include "widgets/road_widget.h"
 
+#ifdef WITH_INTEGRATION
+#include "integration/renderer_input.h"
+#endif
+
 #include "table/strings.h"
 
 #include "safeguards.h"
@@ -1717,6 +1721,39 @@ static void ShowRVStationPicker(Window *parent, RoadStopType rs)
 {
 	new BuildRoadStationWindow(RoadTypeIsRoad(_cur_roadtype) ? _road_station_picker_desc : _tram_station_picker_desc, parent, rs);
 }
+
+#ifdef WITH_INTEGRATION
+bool Integration::RendererSetRoadStopOrientation(Window *window, uint8_t orientation)
+{
+	if (window == nullptr || (window->window_class != WindowClass::BuildBusStation && window->window_class != WindowClass::BuildTruckStation) ||
+			window->IsShaded() || orientation >= 6 || !IsLocalCompany() ||
+			FindWindowById(window->window_class, window->window_number) != window) return false;
+	auto *picker = dynamic_cast<BuildRoadStationWindow *>(window);
+	auto *toolbar = dynamic_cast<BuildRoadToolbarWindow *>(window->parent);
+	if (picker == nullptr || toolbar == nullptr || toolbar->window_class != WindowClass::BuildToolbar ||
+			toolbar->window_number != TransportType::Road || FindWindowById(WindowClass::BuildToolbar, TransportType::Road) != toolbar ||
+			toolbar->roadtype != _cur_roadtype || !ValParamRoadType(_cur_roadtype) ||
+			!CanBuildVehicleInfrastructure(VehicleType::Road, GetRoadTramType(_cur_roadtype))) return false;
+	const WidgetID tool = window->window_class == WindowClass::BuildBusStation ? WID_ROT_BUS_STATION : WID_ROT_TRUCK_STATION;
+	if (toolbar->IsWidgetDisabled(tool) || !toolbar->IsWidgetLowered(tool) || _thd.GetCallbackWnd() != toolbar) return false;
+	const WidgetID widget = WID_BROS_STATION_NE + orientation;
+	const auto *button = picker->GetWidget<NWidgetCore>(widget);
+	if (button == nullptr || button->IsDisabled()) return false;
+	const Rect rect = button->GetCurrentRect();
+	const Point middle{(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2};
+	if (picker->nested_root->GetWidgetFromPos(middle.x, middle.y) != button ||
+			FindWindowFromPt(picker->left + middle.x, picker->top + middle.y) != picker) return false;
+	if (orientation < 4) {
+		if (RoadTypeIsTram(_cur_roadtype)) return false;
+		const RoadStopSpec *spec = RoadStopClass::Get(_roadstop_gui.sel_class)->GetSpec(_roadstop_gui.sel_type);
+		if (spec != nullptr && spec->flags.Test(RoadStopSpecFlag::DriveThroughOnly)) return false;
+	}
+	/* Resolve only the chosen normal widget. Its native handler updates all
+	 * picker state and closes an obsolete join dialog without placing anything. */
+	picker->OnClick(middle, widget, 1);
+	return _roadstop_gui.orientation == static_cast<DiagDirection>(orientation);
+}
+#endif
 
 class RoadWaypointPickerCallbacks : public PickerCallbacksNewGRFClass<RoadStopClass> {
 public:

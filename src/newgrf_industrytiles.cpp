@@ -138,10 +138,10 @@ static const GRFFile *GetIndTileGrffile(IndustryGfx gfx)
  * @param callback_param2 Second parameter (var 18) of the callback.
  */
 IndustryTileResolverObject::IndustryTileResolverObject(IndustryGfx gfx, TileIndex tile, Industry *indus,
-			CallbackID callback, uint32_t callback_param1, uint32_t callback_param2)
+			CallbackID callback, uint32_t callback_param1, uint32_t callback_param2, IndustryPresentationPsaOverlay *presentation_psa)
 	: SpecializedResolverObject<IndustryRandomTriggers>(GetIndTileGrffile(gfx), callback, callback_param1, callback_param2),
 	indtile_scope(*this, indus, tile),
-	ind_scope(*this, tile, indus, indus->type),
+	ind_scope(*this, tile, indus, indus->type, 0, presentation_psa),
 	gfx(gfx)
 {
 	this->root_spritegroup = GetIndustryTileSpec(gfx)->grf_prop.GetSpriteGroup(indus->index != IndustryID::Invalid());
@@ -178,12 +178,12 @@ static void IndustryDrawTileLayout(const TileInfo *ti, const DrawTileSpriteSpan 
 	DrawNewGRFTileSeq(ti, &dts, TransparencyOption::Industries, stage, GetColourPalette(rnd_colour));
 }
 
-uint16_t GetIndustryTileCallback(CallbackID callback, uint32_t param1, uint32_t param2, IndustryGfx gfx_id, Industry *industry, TileIndex tile, std::span<int32_t> regs100)
+uint16_t GetIndustryTileCallback(CallbackID callback, uint32_t param1, uint32_t param2, IndustryGfx gfx_id, Industry *industry, TileIndex tile, std::span<int32_t> regs100, IndustryPresentationPsaOverlay *presentation_psa)
 {
 	assert(industry != nullptr && IsValidTile(tile));
 	assert(industry->index == IndustryID::Invalid() || IsTileType(tile, TileType::Industry));
 
-	IndustryTileResolverObject object(gfx_id, tile, industry, callback, param1, param2);
+	IndustryTileResolverObject object(gfx_id, tile, industry, callback, param1, param2, presentation_psa);
 	return object.ResolveCallback(regs100);
 }
 

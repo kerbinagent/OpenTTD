@@ -23,6 +23,10 @@
 #include "story_base.h"
 #include "command_func.h"
 #include "goal_cmd.h"
+#ifdef WITH_INTEGRATION
+#include "integration/actions_story.h"
+#include "integration/renderer_input.h"
+#endif
 
 #include "widgets/goal_widget.h"
 
@@ -386,6 +390,20 @@ struct GoalQuestionWindow : public Window {
 		DrawStringMultiLine(r, this->question.GetDecodedString(), this->colour, {AlignmentH::Centre, AlignmentV::Top});
 	}
 };
+
+#ifdef WITH_INTEGRATION
+std::optional<nlohmann::json> Integration::RendererGoalQuestionWindowWitness(const Window *window, WidgetID widget, uint16_t id, GoalQuestionButton button)
+{
+	if (window == nullptr || window->window_class != WindowClass::GoalQuestion || window->window_number != id ||
+			widget < WID_GQ_BUTTON_1 || widget > WID_GQ_BUTTON_3) return std::nullopt;
+	const auto *question = static_cast<const GoalQuestionWindow *>(window);
+	auto offered = question->buttons.GetNthSetBit(widget - WID_GQ_BUTTON_1);
+	if (!offered.has_value() || *offered != button) return std::nullopt;
+	/* Called inside its captured native Post, before OnClick closes the popup.
+	 * These are this window's immutable copies, independent of any text inbox. */
+	return Detail::MakeStoryQuestionWitness(id, question->type, question->buttons, question->question);
+}
+#endif
 
 /**
  * Widgets of the goal question window.

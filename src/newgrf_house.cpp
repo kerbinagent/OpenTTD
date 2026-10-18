@@ -107,10 +107,11 @@ void ResetHouses()
  */
 HouseResolverObject::HouseResolverObject(HouseID house_id, TileIndex tile, Town *town,
 		CallbackID callback, uint32_t param1, uint32_t param2,
-		bool not_yet_constructed, uint8_t initial_random_bits, CargoTypes watched_cargo_triggers, int view)
+		bool not_yet_constructed, uint8_t initial_random_bits, CargoTypes watched_cargo_triggers, int view,
+		IndustryPresentationPsaOverlay *presentation_psa)
 	: SpecializedResolverObject<HouseRandomTriggers>(GetHouseSpecGrf(house_id), callback, param1, param2),
 	house_scope(*this, house_id, tile, town, not_yet_constructed, initial_random_bits, watched_cargo_triggers, view),
-	town_scope(*this, town, not_yet_constructed) // Don't access StorePSA if house is not yet constructed.
+	town_scope(*this, town, not_yet_constructed, presentation_psa) // Don't access StorePSA if house is not yet constructed.
 {
 	/* Tile must be valid and a house tile, unless not yet constructed in which case it may also be INVALID_TILE. */
 	assert((IsValidTile(tile) && (not_yet_constructed || IsTileType(tile, TileType::House))) || (not_yet_constructed && tile == INVALID_TILE));
@@ -473,10 +474,11 @@ static uint32_t GetDistanceFromNearbyHouse(uint8_t parameter, TileIndex start_ti
  * @return The NewGRF result of the callback.
  */
 uint16_t GetHouseCallback(CallbackID callback, uint32_t param1, uint32_t param2, HouseID house_id, Town *town, TileIndex tile, std::span<int32_t> regs100,
-		bool not_yet_constructed, uint8_t initial_random_bits, CargoTypes watched_cargo_triggers, int view)
+		bool not_yet_constructed, uint8_t initial_random_bits, CargoTypes watched_cargo_triggers, int view,
+		IndustryPresentationPsaOverlay *presentation_psa)
 {
 	HouseResolverObject object(house_id, tile, town, callback, param1, param2,
-			not_yet_constructed, initial_random_bits, watched_cargo_triggers, view);
+			not_yet_constructed, initial_random_bits, watched_cargo_triggers, view, presentation_psa);
 	return object.ResolveCallback(regs100);
 }
 

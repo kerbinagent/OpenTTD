@@ -302,7 +302,7 @@ CommandCost GetErrorMessageFromLocationCallbackResult(uint16_t cb_res, std::span
 
 void ErrorUnknownCallbackResult(GrfID grfid, uint16_t cbid, uint16_t cb_res);
 bool ConvertBooleanCallback(const struct GRFFile *grffile, uint16_t cbid, uint16_t cb_res);
-bool Convert8bitBooleanCallback(const struct GRFFile *grffile, uint16_t cbid, uint16_t cb_res);
+bool Convert8bitBooleanCallback(const struct GRFFile *grffile, uint16_t cbid, uint16_t cb_res, bool report_invalid = true);
 
 /**
  * Base data related to the handling of grf files.

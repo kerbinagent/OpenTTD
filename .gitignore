@@ -6,3 +6,6 @@ docs/gamedocs/*
 docs/source/*
 /out
 /vcpkg_installed
+__pycache__/
+*.py[cod]
+/.worlds/

@@ -31,6 +31,9 @@
 #include "viewport_kdtree.h"
 #include "newgrf_profiling.h"
 #include "3rdparty/monocypher/monocypher.h"
+#ifdef WITH_INTEGRATION
+#include "integration/actions_story.h"
+#endif
 
 #include "safeguards.h"
 
@@ -91,6 +94,9 @@ void GenerateSavegameId()
 
 void InitializeGame(uint size_x, uint size_y, bool reset_date, bool reset_settings)
 {
+#ifdef WITH_INTEGRATION
+	Integration::ResetStoryPresentations();
+#endif
 	/* Make sure there isn't any window that can influence anything
 	 * related to the new game we're about to start/load. */
 	UnInitWindowSystem();

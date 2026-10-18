@@ -32,6 +32,17 @@ int UpdateCompanyRatingAndValue(Company *c, bool update);
 void StartupIndustryDailyChanges(bool init_counter);
 
 Money GetTransportedGoodsIncome(uint num_pieces, uint dist, uint16_t transit_periods, CargoType cargo_type);
+
+/** Fixed inputs and axis labels of the native cargo payment rates graph. */
+namespace CargoPaymentRatesGraph {
+inline constexpr uint SAMPLE_COUNT = 20;
+inline constexpr uint AMOUNT = 10;
+inline constexpr uint DISTANCE_TILES = 20;
+inline constexpr uint16_t TRANSIT_PERIOD_STEP = 4;
+inline constexpr uint DISPLAY_DAY_STEP = 10;
+inline constexpr uint DISPLAY_SECOND_STEP = 20;
+}
+
 uint MoveGoodsToStation(CargoType cargo, uint amount, Source source, const StationList &all_stations, Owner exclusivity = INVALID_OWNER);
 
 void PrepareUnload(Vehicle *front_v);

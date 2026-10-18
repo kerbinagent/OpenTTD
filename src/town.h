@@ -323,6 +323,9 @@ bool GenerateTowns(TownLayout layout, std::optional<uint> number = std::nullopt)
 Town *TryGenerateNamedTownAroundTile(TileIndex target_tile, TownSize size, bool city, TownLayout layout, std::string_view name);
 const CargoSpec *FindFirstCargoWithTownAcceptanceEffect(TownAcceptanceEffect effect);
 CargoArray GetAcceptedCargoOfHouse(const HouseSpec *hs);
+struct IndustryPresentationPsaOverlay;
+void AddAcceptedCargoOfHouseForObservation(TileIndex tile, CargoArray &acceptance, CargoTypes &always_accepted, IndustryPresentationPsaOverlay &presentation_psa);
+void AddProducedCargoOfHouseForObservation(TileIndex tile, CargoArray &produced, IndustryPresentationPsaOverlay &presentation_psa);
 
 uint8_t GetTownActionCost(TownAction action);
 

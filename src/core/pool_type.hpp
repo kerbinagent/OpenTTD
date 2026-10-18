@@ -294,12 +294,19 @@ public:
 	template <struct Pool<Titem, Tindex, Tgrowth_step, Tpool_type, Tcache> *Tpool>
 	struct PoolItem {
 		const Tindex index; ///< Index of this pool item
+		const uint64_t instance_generation; ///< Process-local identity of this construction; copied snapshots retain it.
 
 		/**
 		 * Construct the item.
 		 * @param index The index of this PoolItem in the pool.
 		 */
-		PoolItem(Tindex index) : index(index) {}
+		PoolItem(Tindex index) : index(index), instance_generation(Tpool->NextInstanceGeneration()) {}
+
+		/** Get the process-local generation, which changes whenever an index is reconstructed. */
+		uint64_t GetInstanceGeneration() const noexcept { return this->instance_generation; }
+
+		/** Allocation watermark for snapshots of this pool; never an object count or ID. */
+		static uint64_t GetLastInstanceGeneration() noexcept { return Tpool->last_instance_generation; }
 
 		/** Type of the pool this item is going to be part of */
 		typedef struct Pool<Titem, Tindex, Tgrowth_step, Tpool_type, Tcache> Pool;
@@ -459,7 +466,9 @@ private:
 	/** Cache of freed pointers */
 	AllocCache *alloc_cache = nullptr;
 	std::allocator<uint8_t> allocator{};
+	uint64_t last_instance_generation = 0; ///< Never reset by CleanPool, including when a new world is loaded.
 
+	uint64_t NextInstanceGeneration();
 	AllocationResult<Tindex> AllocateItem(size_t size, size_t index);
 	void ResizeFor(size_t index);
 	size_t FindFirstFree();

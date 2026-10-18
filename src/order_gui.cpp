@@ -37,6 +37,10 @@
 
 #include "widgets/order_widget.h"
 
+#ifdef WITH_INTEGRATION
+#include "integration/renderer_input.h"
+#endif
+
 #include "table/strings.h"
 
 #include "safeguards.h"
@@ -657,7 +661,7 @@ private:
 		Command<Commands::ModifyOrder>::Post(STR_ERROR_CAN_T_MODIFY_THIS_ORDER, this->vehicle->tile, this->vehicle->index, sel_ord, MOF_UNLOAD, to_underlying(unload_type));
 
 		/* Transfer and unload orders with leave empty as default */
-		if (unload_type == OrderUnloadType::Transfer || unload_type == OrderUnloadType::Unload) {
+		if ((unload_type == OrderUnloadType::Transfer || unload_type == OrderUnloadType::Unload) && order->GetLoadType() != OrderLoadType::NoLoad) {
 			Command<Commands::ModifyOrder>::Post(this->vehicle->tile, this->vehicle->index, sel_ord, MOF_LOAD, to_underlying(OrderLoadType::NoLoad));
 			this->SetWidgetDirty(WID_O_FULL_LOAD);
 		}
@@ -769,6 +773,23 @@ private:
 	}
 
 public:
+#ifdef WITH_INTEGRATION
+	/** Select the normal native Go To mode explicitly, including when already armed. */
+	bool IntegrationArmGoTo()
+	{
+		const auto *button = this->GetWidget<NWidgetCore>(WID_O_GOTO);
+		if (this->IsShaded() || this->owner != _local_company || this->vehicle == nullptr ||
+				Vehicle::GetIfValid(this->window_number) != this->vehicle || this->vehicle->owner != _local_company ||
+				!this->vehicle->IsPrimaryVehicle() || button == nullptr || button->IsDisabled()) return false;
+		const Rect rect = button->GetCurrentRect();
+		const Point middle{(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2};
+		if (this->nested_root->GetWidgetFromPos(middle.x, middle.y) != button ||
+				FindWindowFromPt(this->left + middle.x, this->top + middle.y) != this) return false;
+		this->OrderClick_Goto(OPOS_GOTO);
+		return true;
+	}
+#endif
+
 	OrdersWindow(WindowDesc &desc, const Vehicle *v) : Window(desc)
 	{
 		this->vehicle = v;
@@ -1774,3 +1795,13 @@ void ShowOrdersWindow(const Vehicle *v)
 		new OrdersWindow(v->IsGroundVehicle() ? _orders_train_desc : _orders_desc, v);
 	}
 }
+
+#ifdef WITH_INTEGRATION
+bool Integration::RendererArmOrdersGoTo(Window *window)
+{
+	if (window == nullptr || window->window_class != WindowClass::VehicleOrders || !IsLocalCompany() ||
+			FindWindowById(WindowClass::VehicleOrders, window->window_number) != window) return false;
+	auto *orders = dynamic_cast<OrdersWindow *>(window);
+	return orders != nullptr && orders->IntegrationArmGoTo();
+}
+#endif

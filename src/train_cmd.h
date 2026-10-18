@@ -15,6 +15,11 @@
 #include "network/network_type.h"
 #include "vehicle_type.h"
 
+struct Train;
+
+/** The ordinary invalid-destination wagon move's exact native selection, including self. */
+VehicleID FindRailVehicleMoveDestination(const Train *src);
+
 CommandCost CmdBuildRailVehicle(DoCommandFlags flags, TileIndex tile, const Engine *e, Vehicle **ret);
 CommandCost CmdSellRailWagon(DoCommandFlags flags, Vehicle *t, bool sell_chain, bool backup_order, ClientID user);
 

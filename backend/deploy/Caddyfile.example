@@ -1,0 +1,15 @@
+# Replace the hostname and run Caddy 2.11.7 as an operator-managed service.
+# Caddy obtains and renews the public TLS certificate for this hostname.
+world.example.com {
+	request_body {
+		max_size 64KiB
+	}
+
+	reverse_proxy 127.0.0.1:8080 {
+		stream_timeout 70s
+		transport http {
+			dial_timeout 2s
+			response_header_timeout 20s
+		}
+	}
+}

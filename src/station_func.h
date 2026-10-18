@@ -26,8 +26,9 @@ void ClearAllStationCachedNames();
 
 CommandCost CheckStationSpread(TileArea area, const TileArea &new_area);
 
-CargoArray GetProductionAroundTiles(TileIndex tile, int w, int h, int rad);
-std::pair<CargoArray, CargoTypes> GetAcceptanceAroundTiles(TileIndex tile, int w, int h, int rad);
+struct IndustryPresentationPsaOverlay;
+CargoArray GetProductionAroundTiles(TileIndex tile, int w, int h, int rad, IndustryPresentationPsaOverlay *presentation_psa = nullptr);
+std::pair<CargoArray, CargoTypes> GetAcceptanceAroundTiles(TileIndex tile, int w, int h, int rad, IndustryPresentationPsaOverlay *presentation_psa = nullptr);
 
 void UpdateStationAcceptance(Station *st, bool show_msg);
 CargoTypes GetAcceptanceMask(const Station *st);

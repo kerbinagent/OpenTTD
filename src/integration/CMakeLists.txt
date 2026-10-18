@@ -1,0 +1,37 @@
+add_files(
+    actions.cpp
+    actions.h
+    actions_internal.h
+    actions_common.cpp
+    actions_access.cpp
+    actions_story.cpp
+    actions_story.h
+    actions_orders.cpp
+    actions_management.cpp
+    actions_construction.cpp
+    actions_company.cpp
+    observations.cpp
+    observations_world_details.cpp
+    observations_stations.cpp
+    observations_vehicles.cpp
+    observations_industries.cpp
+    actions_limits.h
+    actions_vehicle_scope.h
+    actions_spatial.cpp
+    actions_spatial.h
+    bridge.cpp
+    integration_bridge.h
+    bridge_hooks.h
+    chat.cpp
+    chat.h
+    ledger.cpp
+    ledger.h
+    renderer.cpp
+    renderer.h
+    renderer_image.cpp
+    renderer_image.h
+    renderer_input.cpp
+    renderer_input.h
+    visual_commands.cpp
+    visual_commands.h
+)

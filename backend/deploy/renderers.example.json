@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "world_id": "world-1",
+  "runs": {
+    "00000000000000000000000000000001": {
+      "socket": "/run/openttd/renderer-1.sock",
+      "artifacts": "/run/openttd/render-artifacts-1"
+    },
+    "00000000000000000000000000000002": {
+      "socket": "/run/openttd/renderer-2.sock",
+      "artifacts": "/run/openttd/render-artifacts-2"
+    },
+    "00000000000000000000000000000003": {
+      "socket": "/run/openttd/renderer-3.sock",
+      "artifacts": "/run/openttd/render-artifacts-3"
+    },
+    "00000000000000000000000000000004": {
+      "socket": "/run/openttd/renderer-4.sock",
+      "artifacts": "/run/openttd/render-artifacts-4"
+    }
+  }
+}

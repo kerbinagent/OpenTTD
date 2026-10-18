@@ -41,6 +41,10 @@
 #include "timer/timer.h"
 #include "timer/timer_window.h"
 
+#ifdef WITH_INTEGRATION
+#include "integration/renderer_input.h"
+#endif
+
 #include "widgets/osk_widget.h"
 
 #include "table/strings.h"
@@ -1113,6 +1117,10 @@ void Window::Close([[maybe_unused]] int data)
 {
 	/* Don't close twice. */
 	if (*this->z_position == nullptr) return;
+
+#ifdef WITH_INTEGRATION
+	Integration::RendererInputWindowClosed(this);
+#endif
 
 	*this->z_position = nullptr;
 

@@ -12,12 +12,34 @@
 
 #include "newgrf_town.h"
 
+#include <array>
+#include <map>
+#include <optional>
+
+struct Industry;
+struct Town;
+
+/** Request-local callback writes, allocated only for encountered owners; no pool items. */
+struct IndustryPresentationPsaOverlay final {
+	static constexpr size_t CELL_COUNT = 256;
+	using Writes = std::array<std::optional<int32_t>, CELL_COUNT>;
+	const Industry *industry; ///< Live industry whose callback sequence this overlay belongs to.
+	const Town *town; ///< The industry's live parent town, if present.
+	GrfID active_grfid; ///< GRFID from the resolving industry spec, not caller input.
+	std::map<const Industry *, Writes> industry_writes;
+	std::map<std::pair<const Town *, GrfID>, Writes> town_writes;
+
+	IndustryPresentationPsaOverlay(const Industry *industry, const Town *town, GrfID active_grfid) :
+		industry(industry), town(town), active_grfid(active_grfid) {}
+};
+
 /** Resolver for industry scopes. */
 struct IndustriesScopeResolver : public ScopeResolver {
 	TileIndex tile;     ///< Tile owned by the industry.
 	Industry *industry; ///< %Industry being resolved.
 	IndustryType type;  ///< Type of the industry.
 	uint32_t random_bits; ///< Random bits of the new industry.
+	IndustryPresentationPsaOverlay *presentation_psa = nullptr; ///< Query-local shadow writes, if any.
 
 	/**
 	 * Scope resolver for industries.
@@ -27,8 +49,9 @@ struct IndustriesScopeResolver : public ScopeResolver {
 	 * @param type Type of the industry.
 	 * @param random_bits Random bits of the new industry.
 	 */
-	IndustriesScopeResolver(ResolverObject &ro, TileIndex tile, Industry *industry, IndustryType type, uint32_t random_bits = 0)
-		: ScopeResolver(ro), tile(tile), industry(industry), type(type), random_bits(random_bits)
+	IndustriesScopeResolver(ResolverObject &ro, TileIndex tile, Industry *industry, IndustryType type, uint32_t random_bits = 0,
+			IndustryPresentationPsaOverlay *presentation_psa = nullptr)
+		: ScopeResolver(ro), tile(tile), industry(industry), type(type), random_bits(random_bits), presentation_psa(presentation_psa)
 	{
 	}
 
@@ -42,9 +65,13 @@ struct IndustriesScopeResolver : public ScopeResolver {
 struct IndustriesResolverObject : public ResolverObject {
 	IndustriesScopeResolver industries_scope; ///< Scope resolver for the industry.
 	std::optional<TownScopeResolver> town_scope = std::nullopt; ///< Scope resolver for the associated town (if needed and available, else \c std::nullopt).
+	IndustryPresentationPsaOverlay *presentation_psa = nullptr; ///< Explicit request-local overlay, or normal live PSA path.
 
 	IndustriesResolverObject(TileIndex tile, Industry *indus, IndustryType type, uint32_t random_bits = 0,
 			CallbackID callback = CBID_NO_CALLBACK, uint32_t callback_param1 = 0, uint32_t callback_param2 = 0);
+	IndustriesResolverObject(TileIndex tile, Industry *indus, IndustryType type, uint32_t random_bits,
+			CallbackID callback, uint32_t callback_param1, uint32_t callback_param2,
+			IndustryPresentationPsaOverlay *presentation_psa);
 
 	TownScopeResolver *GetTown();
 
@@ -77,6 +104,8 @@ enum class IndustryAvailabilityCallType : uint8_t {
 
 /* in newgrf_industry.cpp */
 uint16_t GetIndustryCallback(CallbackID callback, uint32_t param1, uint32_t param2, Industry *industry, IndustryType type, TileIndex tile, std::span<int32_t> regs100 = {});
+uint16_t GetIndustryCallbackForObservation(CallbackID callback, uint32_t param1, uint32_t param2, Industry *industry,
+		IndustryType type, TileIndex tile, std::span<int32_t> regs100, IndustryPresentationPsaOverlay &presentation_psa);
 uint32_t GetIndustryIDAtOffset(TileIndex new_tile, const Industry *i, GrfID cur_grfid);
 void IndustryProductionCallback(Industry *ind, int reason);
 CommandCost CheckIfCallBackAllowsCreation(TileIndex tile, IndustryType type, size_t layout, uint32_t seed, uint16_t initial_random_bits, Owner founder, IndustryAvailabilityCallType creation_type);

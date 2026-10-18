@@ -11,6 +11,7 @@
 #include "debug.h"
 #include "town.h"
 #include "newgrf_town.h"
+#include "newgrf_industries.h"
 #include "timer/timer_game_tick.h"
 
 #include "safeguards.h"
@@ -70,6 +71,10 @@ static uint32_t GetNearbyTileInformation(uint8_t parameter, TileIndex tile, bool
 			if (grfid == INVALID_GRFID) {
 				if (this->ro.grffile == nullptr) return 0;
 				grfid = this->ro.grffile->grfid;
+			}
+			if (this->presentation_psa != nullptr && parameter < IndustryPresentationPsaOverlay::CELL_COUNT) {
+				auto found = this->presentation_psa->town_writes.find({this->t, grfid});
+				if (found != this->presentation_psa->town_writes.end() && found->second[parameter].has_value()) return *found->second[parameter];
 			}
 
 			for (auto &it : this->t->psa_list) {
@@ -167,6 +172,10 @@ static uint32_t GetNearbyTileInformation(uint8_t parameter, TileIndex tile, bool
 	/* A NewGRF can only write in the persistent storage associated to its own GRFID. */
 	if (grfid == INVALID_GRFID) grfid = this->ro.grffile->grfid;
 	if (grfid != this->ro.grffile->grfid) return;
+	if (this->presentation_psa != nullptr) {
+		if (pos < IndustryPresentationPsaOverlay::CELL_COUNT) this->presentation_psa->town_writes[{this->t, grfid}][pos] = value;
+		return; // No live PSA creation or StoreValue during observation.
+	}
 
 	/* Check if the storage exists. */
 	for (auto &it : t->psa_list) {

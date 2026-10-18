@@ -1,0 +1,2064 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:openttd:backend:public-api:v1",
+  "title": "OpenTTD backend public API v1 JSON envelopes",
+  "description": "Documentation of public JSON bodies. Authorization, mode, current engine capabilities, ownership, image freshness, and canonical gameplay parameters are enforced at runtime. Binary PNG and SSE framing are outside this schema.",
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+    },
+    "imageId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "Opaque image IDs emitted by the native renderer are exactly 32 lowercase hexadecimal characters."
+    },
+    "companyId": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 14
+    },
+    "actionName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.]{0,79}$",
+      "description": "Names and parameters are runtime capabilities from engine-catalog-v1.json."
+    },
+    "handle": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "generation": {
+          "type": "integer"
+        },
+        "engine_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "id",
+        "generation",
+        "engine_instance_id"
+      ],
+      "additionalProperties": false,
+      "description": "Copy all three fields from an engine observation or action result. Refresh before a new action after engine restart; the backend never substitutes the current instance."
+    },
+    "legacyReceiptHandle": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "generation": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "generation"
+      ],
+      "additionalProperties": false,
+      "description": "Historical receipt only: a pre-upgrade handle remains unchanged on GET or an exact same-ID retry. This shape is rejected for new commands."
+    },
+    "publicError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "game_message": {
+          "type": "string"
+        },
+        "string_id": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "additionalProperties": false
+    },
+    "errorResponse": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    "textActionParameters": {
+      "type": "object",
+      "description": "Shared by both perception modes and validated against the named canonical native action at runtime."
+    },
+    "textActionRequest": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "action": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/actionName"
+                },
+                {
+                  "not": {
+                    "const": "ui.apply"
+                  }
+                }
+              ]
+            },
+            "parameters": {
+              "$ref": "#/$defs/textActionParameters"
+            }
+          },
+          "required": [
+            "name",
+            "parameters"
+          ],
+          "additionalProperties": false
+        },
+        "preconditions": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "request_id",
+        "action"
+      ],
+      "additionalProperties": false,
+      "description": "Shared semantic action request for text and visual runs; the named action uses one native-generated parameter schema."
+    },
+    "clickParameters": {
+      "type": "object",
+      "properties": {
+        "image_id": {
+          "$ref": "#/$defs/imageId"
+        },
+        "gesture": {
+          "const": "click"
+        },
+        "x": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "button": {
+          "enum": [
+            "left",
+            "right"
+          ]
+        },
+        "ctrl": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "image_id",
+        "gesture",
+        "x",
+        "y"
+      ],
+      "additionalProperties": false
+    },
+    "dragParameters": {
+      "type": "object",
+      "properties": {
+        "image_id": {
+          "$ref": "#/$defs/imageId"
+        },
+        "gesture": {
+          "const": "drag"
+        },
+        "x": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_x": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_y": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "button": {
+          "const": "left"
+        },
+        "ctrl": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "image_id",
+        "gesture",
+        "x",
+        "y",
+        "end_x",
+        "end_y"
+      ],
+      "additionalProperties": false
+    },
+    "moveParameters": {
+      "type": "object",
+      "properties": {
+        "image_id": {
+          "$ref": "#/$defs/imageId"
+        },
+        "gesture": {
+          "const": "move"
+        },
+        "x": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "image_id",
+        "gesture",
+        "x",
+        "y"
+      ],
+      "additionalProperties": false
+    },
+    "textParameters": {
+      "type": "object",
+      "properties": {
+        "image_id": {
+          "$ref": "#/$defs/imageId"
+        },
+        "gesture": {
+          "const": "text"
+        },
+        "x": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029\\ue000-\\ue2ff]*$(?![\\s\\S])",
+          "description": "Verbatim replacement text, including empty text, at most 4096 UTF-8 bytes. The service enforces the byte limit and the native editbox enforces its character filter and size without truncating. Confirmation requires a separate gesture."
+        }
+      },
+      "required": [
+        "image_id",
+        "gesture",
+        "x",
+        "y",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "ordersGoToControlParameters": {
+      "type": "object",
+      "properties": {
+        "image_id": {
+          "$ref": "#/$defs/imageId"
+        },
+        "gesture": {
+          "const": "control"
+        },
+        "control": {
+          "const": "orders.go_to"
+        },
+        "x": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        }
+      },
+      "required": [
+        "image_id",
+        "gesture",
+        "control",
+        "x",
+        "y"
+      ],
+      "additionalProperties": false,
+      "description": "Anchor any visible point in the owned unshaded Orders window; native code checks and arms the Go To widget separately."
+    },
+    "roadStopOrientationControlParameters": {
+      "type": "object",
+      "properties": {
+        "image_id": {
+          "$ref": "#/$defs/imageId"
+        },
+        "gesture": {
+          "const": "control"
+        },
+        "control": {
+          "const": "road_stop.orientation"
+        },
+        "orientation": {
+          "enum": [
+            "terminal_ne",
+            "terminal_se",
+            "terminal_sw",
+            "terminal_nw",
+            "drive_through_ne_sw",
+            "drive_through_se_nw"
+          ]
+        },
+        "x": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        }
+      },
+      "required": [
+        "image_id",
+        "gesture",
+        "control",
+        "orientation",
+        "x",
+        "y"
+      ],
+      "additionalProperties": false,
+      "description": "Anchor any visible point in the active bus/truck road-stop picker; native code checks the matching Road Toolbar and enabled explicit orientation choice separately."
+    },
+    "visualActionRequest": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "action": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "ui.apply"
+            },
+            "parameters": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/clickParameters"
+                },
+                {
+                  "$ref": "#/$defs/dragParameters"
+                },
+                {
+                  "$ref": "#/$defs/moveParameters"
+                },
+                {
+                  "$ref": "#/$defs/textParameters"
+                },
+                {
+                  "$ref": "#/$defs/ordersGoToControlParameters"
+                },
+                {
+                  "$ref": "#/$defs/roadStopOrientationControlParameters"
+                }
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "parameters"
+          ],
+          "additionalProperties": false
+        },
+        "preconditions": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "request_id",
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "actionRequest": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/textActionRequest"
+        },
+        {
+          "$ref": "#/$defs/visualActionRequest"
+        }
+      ]
+    },
+    "estimateRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "allOf": [
+                {"$ref": "#/$defs/actionName"},
+                {"not": {"const": "ui.apply"}}
+              ]
+            },
+            "parameters": {"$ref": "#/$defs/textActionParameters"}
+          },
+          "required": ["name", "parameters"],
+          "additionalProperties": false
+        },
+        "preconditions": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      "required": ["action"],
+      "additionalProperties": false,
+      "description": "One current typed action test for either perception mode. It has no request_id or gameplay receipt."
+    },
+    "estimateResult": {
+      "type": "object",
+      "properties": {
+        "success": {"type": "boolean"},
+        "cost": {"type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807},
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {"const": "gameplay_rejected"},
+            "message": {"type": "string", "maxLength": 1024}
+          },
+          "required": ["code", "message"],
+          "additionalProperties": false
+        },
+        "advisory": {"const": true},
+        "test_and_execute_may_differ": {"type": "boolean"}
+      },
+      "required": ["success", "cost", "advisory", "test_and_execute_may_differ"],
+      "additionalProperties": false,
+      "oneOf": [
+        {"properties": {"success": {"const": true}}, "not": {"required": ["error"]}},
+        {"properties": {"success": {"const": false}}, "required": ["error"]}
+      ],
+      "description": "Advisory native Shift test feedback. Error message is additionally bounded to 1024 UTF-8 bytes and the response to 4096 wire bytes at runtime."
+    },
+    "estimateResponse": {
+      "type": "object",
+      "properties": {"estimate": {"$ref": "#/$defs/estimateResult"}},
+      "required": ["estimate"],
+      "additionalProperties": false
+    },
+    "actionStatus": {
+      "enum": [
+        "accepted",
+        "queued",
+        "completed",
+        "rejected",
+        "uncertain",
+        "resolved_rolled_back"
+      ]
+    },
+    "actionResult": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "cost": {
+          "type": "integer"
+        },
+        "error": {
+          "$ref": "#/$defs/publicError"
+        },
+        "vehicle_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/handle"
+            },
+            {
+              "$ref": "#/$defs/legacyReceiptHandle"
+            }
+          ]
+        },
+        "group_id": {
+          "$ref": "#/$defs/handle"
+        },
+        "sign_id": {
+          "$ref": "#/$defs/handle"
+        },
+        "town_id": {
+          "$ref": "#/$defs/handle"
+        },
+        "capacity": {
+          "type": "integer"
+        },
+        "mail_capacity": {
+          "type": "integer"
+        },
+        "cargo_capacities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cargo_id": {
+                "type": "integer"
+              },
+              "capacity": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cargo_id",
+              "capacity"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "station_id": {
+          "$ref": "#/$defs/handle"
+        },
+        "depot_id": {
+          "$ref": "#/$defs/handle"
+        },
+        "order_version": {
+          "type": "string",
+          "pattern": "^ov1:[0-9a-f]{64}$",
+          "minLength": 68,
+          "maxLength": 68
+        },
+        "source_order_version": {
+          "type": "string",
+          "pattern": "^ov1:[0-9a-f]{64}$",
+          "minLength": 68,
+          "maxLength": 68
+        },
+        "page_version": {
+          "type": "string",
+          "pattern": "^spv1:[0-9a-f]{64}$",
+          "minLength": 69,
+          "maxLength": 69
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "textActionResponse": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "status": {
+          "$ref": "#/$defs/actionStatus"
+        },
+        "checkpoint_state": {
+          "enum": [
+            "uncheckpointed",
+            "checkpointed",
+            "uncertain"
+          ]
+        },
+        "tick": {
+          "type": "integer"
+        },
+        "result": {
+          "$ref": "#/$defs/actionResult"
+        },
+        "error": {
+          "$ref": "#/$defs/publicError"
+        }
+      },
+      "required": [
+        "request_id",
+        "status",
+        "checkpoint_state"
+      ],
+      "additionalProperties": false
+    },
+    "visualActionResponse": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "status": {
+          "$ref": "#/$defs/actionStatus"
+        }
+      },
+      "required": [
+        "request_id",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "actionResponse": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/textActionResponse"
+        },
+        {
+          "$ref": "#/$defs/visualActionResponse"
+        }
+      ],
+      "description": "Semantic actions return ordinary direct command feedback in both perception modes. Visual semantic replies omit tick/capacity/refit statistics and unrelated state; ui.apply retains the request_id/status-only gesture response. Authenticated mode and action select the runtime projection."
+    },
+    "observationRequest": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Canonical query name from engine-catalog-v1.json, subject to current engine capabilities."
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Validated against the named canonical query at runtime."
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "observationResponse": {
+      "type": "object",
+      "properties": {
+        "observation": {
+          "type": "object",
+          "description": "Query-specific positive DTO; result_fields and query names are in engine-catalog-v1.json."
+        }
+      },
+      "required": [
+        "observation"
+      ],
+      "additionalProperties": false
+    },
+    "viewCaptureRequest": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "viewCaptureResponse": {
+      "type": "object",
+      "properties": {
+        "image_id": {
+          "$ref": "#/$defs/imageId"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "image_id",
+        "width",
+        "height"
+      ],
+      "additionalProperties": false
+    },
+    "viewControlRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "image_id": {
+              "$ref": "#/$defs/imageId"
+            },
+            "action": {
+              "const": "pan"
+            },
+            "dx": {
+              "type": "integer"
+            },
+            "dy": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "image_id",
+            "action",
+            "dx",
+            "dy"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "image_id": {
+              "$ref": "#/$defs/imageId"
+            },
+            "action": {
+              "const": "zoom"
+            },
+            "steps": {
+              "type": "integer",
+              "minimum": -3,
+              "maximum": 3
+            }
+          },
+          "required": [
+            "image_id",
+            "action",
+            "steps"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "image_id": {
+              "$ref": "#/$defs/imageId"
+            },
+            "action": {
+              "const": "inspect"
+            },
+            "x": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "y": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "image_id",
+            "action",
+            "x",
+            "y"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "image_id": {
+              "$ref": "#/$defs/imageId"
+            },
+            "action": {
+              "const": "open_window"
+            },
+            "window": {
+              "enum": [
+                "company",
+                "finances",
+                "stations",
+                "road_construction",
+                "rail_construction",
+                "water_construction",
+                "airport_construction",
+                "landscaping",
+                "trees"
+              ]
+            }
+          },
+          "required": [
+            "image_id",
+            "action",
+            "window"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "image_id": {
+              "$ref": "#/$defs/imageId"
+            },
+            "action": {
+              "const": "open_window"
+            },
+            "window": {
+              "const": "vehicles"
+            },
+            "vehicle_type": {
+              "enum": [
+                "rail",
+                "road",
+                "ship",
+                "air"
+              ]
+            }
+          },
+          "required": [
+            "image_id",
+            "action",
+            "window",
+            "vehicle_type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "image_id": {
+              "$ref": "#/$defs/imageId"
+            },
+            "action": {
+              "const": "close_windows"
+            }
+          },
+          "required": [
+            "image_id",
+            "action"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "description": "Image ownership/freshness and pixel or pan bounds depend on the owned image and are checked at runtime."
+    },
+    "viewControlResponse": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "const": "completed"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "meResponse": {
+      "type": "object",
+      "properties": {
+        "identity_id": {
+          "type": "string"
+        },
+        "world_id": {
+          "type": "string"
+        },
+        "company_id": {
+          "$ref": "#/$defs/companyId"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "text",
+            "visual"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity_id",
+        "world_id",
+        "company_id",
+        "run_id",
+        "mode",
+        "kind",
+        "display_name"
+      ],
+      "additionalProperties": false
+    },
+    "participant": {
+      "type": "object",
+      "properties": {
+        "identity_id": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "company_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/companyId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "presence": {
+          "enum": [
+            "online",
+            "unknown"
+          ]
+        },
+        "native_handle": {
+          "$ref": "#/$defs/handle",
+          "description": "Both perception modes: a current active native human connection using its explicit network ClientID, obtained after fresh roster and managed-worker classification. Copy this complete value as company.participant.authorize.parameters.participant. Uncertain classification omits the handle."
+        }
+      },
+      "required": [
+        "identity_id",
+        "display_name",
+        "kind",
+        "company_id",
+        "presence"
+      ],
+      "additionalProperties": false
+    },
+    "participantsResponse": {
+      "type": "object",
+      "properties": {
+        "participants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/participant"
+          }
+        }
+      },
+      "required": [
+        "participants"
+      ],
+      "additionalProperties": false
+    },
+    "capabilityAction": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string"
+        },
+        "available": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "category",
+        "action",
+        "available"
+      ],
+      "additionalProperties": false
+    },
+    "visualTool": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "const": "ui.apply"
+        },
+        "target": {
+          "const": "image"
+        },
+        "gestures": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "click",
+              "drag",
+              "move",
+              "text",
+              "control"
+            ]
+          }
+        }
+      },
+      "required": [
+        "name",
+        "target",
+        "gestures"
+      ],
+      "additionalProperties": false
+    },
+    "capabilitiesResponse": {
+      "type": "object",
+      "properties": {
+        "api_version": {
+          "const": "v1"
+        },
+        "engine_connected": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": [
+            "text",
+            "visual"
+          ]
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/capabilityAction"
+          }
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/visualTool"
+          }
+        },
+        "view_controls": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "pan",
+              "zoom",
+              "inspect",
+              "open_window",
+              "close_windows",
+              "capture"
+            ]
+          }
+        },
+        "observation": {
+          "enum": [
+            "structured",
+            "screenshots"
+          ]
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "request_bytes": {
+              "type": "integer"
+            },
+            "query_limit": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "request_bytes",
+            "query_limit"
+          ],
+          "additionalProperties": false
+        },
+        "unimplemented_human_actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "control_reference": {
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "const": "/v1/control/reference"
+            },
+            "parameters": {
+              "type": "object"
+            },
+            "result_fields": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "kind",
+                  "reference",
+                  "order_version",
+                  "page",
+                  "page_version",
+                  "engine_id"
+                ]
+              }
+            }
+          },
+          "required": [
+            "endpoint",
+            "parameters",
+            "result_fields"
+          ],
+          "additionalProperties": false
+        },
+        "action_estimate": {
+          "type": "object",
+          "properties": {
+            "endpoint": {"const": "/v1/actions/estimate"},
+            "interval_ms": {"const": 1000},
+            "result_bytes": {"const": 4096}
+          },
+          "required": ["endpoint", "interval_ms", "result_bytes"],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "api_version",
+        "engine_connected",
+        "mode",
+        "actions",
+        "tools",
+        "view_controls",
+        "observation",
+        "limits",
+        "unimplemented_human_actions"
+      ],
+      "additionalProperties": false
+    },
+    "threadCreateRequest": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "enum": [
+            "world",
+            "company",
+            "direct_company"
+          ]
+        },
+        "company_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/companyId"
+          }
+        }
+      },
+      "required": [
+        "scope"
+      ],
+      "additionalProperties": false
+    },
+    "thread": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "thread_id": {
+          "type": "string"
+        },
+        "scope": {
+          "enum": [
+            "world",
+            "company",
+            "direct_company",
+            "direct_identity"
+          ]
+        },
+        "company_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/companyId"
+          }
+        },
+        "identity_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "muted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "thread_id",
+        "scope",
+        "company_ids",
+        "identity_ids",
+        "created_at",
+        "muted"
+      ],
+      "additionalProperties": false
+    },
+    "threadsResponse": {
+      "type": "object",
+      "properties": {
+        "threads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/thread"
+          }
+        }
+      },
+      "required": [
+        "threads"
+      ],
+      "additionalProperties": false
+    },
+    "messageSendRequest": {
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 768,
+          "description": "Must contain non-whitespace text and be at most 768 UTF-8 bytes. JSON Schema maxLength counts code points, so the byte limit is enforced by the service."
+        },
+        "request_id": {
+          "$ref": "#/$defs/identifier"
+        }
+      },
+      "required": [
+        "body",
+        "request_id"
+      ],
+      "additionalProperties": false
+    },
+    "chatPerson": {
+      "type": "object",
+      "properties": {
+        "identity_id": {
+          "type": "string"
+        },
+        "company_id": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity_id",
+        "kind",
+        "display_name"
+      ],
+      "additionalProperties": false
+    },
+    "message": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "thread_id": {
+          "type": "string"
+        },
+        "world_id": {
+          "type": "string"
+        },
+        "scope": {
+          "enum": [
+            "world",
+            "company",
+            "direct_company",
+            "direct_identity"
+          ]
+        },
+        "recipient_company_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/companyId"
+          }
+        },
+        "recipient_identity_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sender": {
+          "$ref": "#/$defs/chatPerson"
+        },
+        "recipients": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/chatPerson"
+          }
+        },
+        "body": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "tick": {
+          "type": "integer"
+        },
+        "tick_authoritative": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "message_id",
+        "thread_id",
+        "world_id",
+        "scope",
+        "recipient_company_ids",
+        "recipient_identity_ids",
+        "sender",
+        "recipients",
+        "body",
+        "timestamp",
+        "tick",
+        "tick_authoritative"
+      ],
+      "additionalProperties": false
+    },
+    "messageHistory": {
+      "type": "object",
+      "properties": {
+        "thread_id": {
+          "type": "string"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/message"
+          }
+        },
+        "next_after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "thread_id",
+        "messages",
+        "next_after"
+      ],
+      "additionalProperties": false
+    },
+    "blockRequest": {
+      "type": "object",
+      "properties": {
+        "identity_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "blocked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "identity_id"
+      ],
+      "additionalProperties": false
+    },
+    "blockResponse": {
+      "type": "object",
+      "properties": {
+        "identity_id": {
+          "type": "string"
+        },
+        "blocked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "identity_id",
+        "blocked"
+      ],
+      "additionalProperties": false
+    },
+    "muteRequest": {
+      "type": "object",
+      "properties": {
+        "thread_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "muted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "thread_id"
+      ],
+      "additionalProperties": false
+    },
+    "muteResponse": {
+      "type": "object",
+      "properties": {
+        "thread_id": {
+          "type": "string"
+        },
+        "muted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "thread_id",
+        "muted"
+      ],
+      "additionalProperties": false
+    },
+    "reportRequest": {
+      "type": "object",
+      "properties": {
+        "message_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "message_id",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "reportResponse": {
+      "type": "object",
+      "properties": {
+        "report_id": {
+          "type": "string"
+        },
+        "status": {
+          "const": "received"
+        }
+      },
+      "required": [
+        "report_id",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "chatEventData": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "thread_id": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "sender": {
+          "$ref": "#/$defs/chatPerson"
+        },
+        "recipients": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/chatPerson"
+          }
+        },
+        "body": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "tick": {
+          "type": "integer"
+        },
+        "tick_authoritative": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "chatTickEventData": {
+      "type": "object",
+      "properties": {
+        "message_id": {
+          "type": "string"
+        },
+        "tick": {
+          "type": "integer"
+        },
+        "tick_authoritative": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "event": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "action.status"
+            },
+            "data": {
+              "$ref": "#/$defs/actionResponse"
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "chat.message"
+            },
+            "data": {
+              "$ref": "#/$defs/chatEventData"
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "data"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "chat.message.tick"
+            },
+            "data": {
+              "$ref": "#/$defs/chatTickEventData"
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "data"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "eventsResponse": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/event"
+          }
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "events",
+        "cursor"
+      ],
+      "additionalProperties": false
+    },
+    "visualCommandError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "game_message": {
+          "type": "string",
+          "maxLength": 2048
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "description": "Native command feedback; code is capped at 256 UTF-8 bytes and text at 2048 UTF-8 bytes per field. Native formatting/control codes are removed."
+    },
+    "visualSemanticActionResult": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "cost": {
+          "type": "integer"
+        },
+        "error": {
+          "$ref": "#/$defs/visualCommandError"
+        },
+        "vehicle_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/handle"
+            },
+            {
+              "$ref": "#/$defs/legacyReceiptHandle"
+            }
+          ]
+        },
+        "group_id": {
+          "$ref": "#/$defs/handle"
+        },
+        "sign_id": {
+          "$ref": "#/$defs/handle"
+        },
+        "town_id": {
+          "$ref": "#/$defs/handle"
+        },
+        "station_id": {
+          "$ref": "#/$defs/handle"
+        },
+        "depot_id": {
+          "$ref": "#/$defs/handle"
+        },
+        "order_version": {
+          "type": "string",
+          "pattern": "^ov1:[0-9a-f]{64}$",
+          "minLength": 68,
+          "maxLength": 68
+        },
+        "source_order_version": {
+          "type": "string",
+          "pattern": "^ov1:[0-9a-f]{64}$",
+          "minLength": 68,
+          "maxLength": 68
+        },
+        "page_version": {
+          "type": "string",
+          "pattern": "^spv1:[0-9a-f]{64}$",
+          "minLength": 69,
+          "maxLength": 69
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "visualSemanticActionResponse": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "status": {
+          "$ref": "#/$defs/actionStatus"
+        },
+        "checkpoint_state": {
+          "enum": [
+            "uncheckpointed",
+            "checkpointed",
+            "uncertain"
+          ]
+        },
+        "result": {
+          "$ref": "#/$defs/visualSemanticActionResult"
+        },
+        "error": {
+          "$ref": "#/$defs/visualCommandError"
+        }
+      },
+      "required": [
+        "request_id",
+        "status",
+        "checkpoint_state"
+      ],
+      "additionalProperties": false
+    },
+    "controlReferenceRequest": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "maximum": 63999,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "enum": [
+                "station",
+                "waypoint",
+                "depot",
+                "group",
+                "town",
+                "sign",
+                "story_page",
+                "story_element"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "maximum": 1044479,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "enum": [
+                "vehicle"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "maximum": 14,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "enum": [
+                "company"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "enum": [
+                "question"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "maximum": 65534,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "enum": [
+                "engine"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "vehicle"
+              ],
+              "type": "string"
+            },
+            "unit_number": {
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "vehicle_type": {
+              "enum": [
+                "rail",
+                "road",
+                "ship",
+                "aircraft"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "unit_number",
+            "vehicle_type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "station",
+                "waypoint",
+                "depot"
+              ],
+              "type": "string"
+            },
+            "tile": {
+              "anyOf": [
+                {
+                  "maximum": 4294967294,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "x": {
+                      "maximum": 4294967295,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "y": {
+                      "maximum": 4294967295,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "x",
+                    "y"
+                  ],
+                  "type": "object"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "tile"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "engine"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "vehicle_type": {
+              "enum": [
+                "rail",
+                "road",
+                "ship",
+                "aircraft"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "vehicle_type"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "POST /v1/control/reference accepts exactly one selector validated by engine-catalog-v1.json conventions.control_reference.parameters. Explicit IDs acquire the current occupant; they never rebind an old action/handle or promise identity across restarts. No renderer or screenshot is required."
+    },
+    "controlReferenceResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "engine"
+              ]
+            },
+            "engine_id": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65534
+            }
+          },
+          "required": [
+            "kind",
+            "engine_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "vehicle"
+              ]
+            },
+            "reference": {
+              "$ref": "#/$defs/handle"
+            },
+            "order_version": {
+              "type": "string",
+              "pattern": "^ov1:[0-9a-f]{64}$",
+              "minLength": 68,
+              "maxLength": 68
+            }
+          },
+          "required": [
+            "kind",
+            "reference"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "story_page",
+                "story_element"
+              ]
+            },
+            "reference": {
+              "$ref": "#/$defs/handle"
+            },
+            "page": {
+              "$ref": "#/$defs/handle"
+            },
+            "page_version": {
+              "type": "string",
+              "pattern": "^spv1:[0-9a-f]{64}$",
+              "minLength": 69,
+              "maxLength": 69
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "page",
+            "page_version"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "station",
+                "waypoint",
+                "depot",
+                "group",
+                "town",
+                "sign",
+                "company",
+                "question"
+              ]
+            },
+            "reference": {
+              "$ref": "#/$defs/handle"
+            }
+          },
+          "required": [
+            "kind",
+            "reference"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "description": "HTTP 200 direct actuator reference/token response, without a wrapper. Missing/ambiguous/unauthorized targets and the shared expensive-work admission limit use HTTP 409 control_reference_unavailable; retry with backoff. No attributes, lists or counts."
+    }
+  }
+}

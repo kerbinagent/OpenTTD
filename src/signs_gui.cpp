@@ -32,6 +32,12 @@
 #include "timer/timer_window.h"
 #include "dropdown_func.h"
 
+#ifdef WITH_INTEGRATION
+#include "company_base.h"
+#include "integration/bridge_hooks.h"
+#include "integration/renderer_input.h"
+#endif
+
 #include "widgets/sign_widget.h"
 
 #include "table/strings.h"
@@ -407,6 +413,9 @@ struct SignWindow : Window, SignList {
 	SignID cur_sign{};
 	WidgetID last_user_action = INVALID_WIDGET; ///< Last started user action.
 	std::optional<Colours> new_colour; ///< New colour selected by the user. Will be assigned when the OK button is clicked.
+#ifdef WITH_INTEGRATION
+	uint64_t renderer_sign_generation = 0; ///< Exact local target incarnation, refreshed by native sign navigation.
+#endif
 
 	SignWindow(WindowDesc &desc, const Sign *si) : Window(desc), name_editbox(MAX_LENGTH_SIGN_NAME_CHARS * MAX_CHAR_LENGTH, MAX_LENGTH_SIGN_NAME_CHARS), cur_sign(si->index)
 	{
@@ -437,11 +446,31 @@ struct SignWindow : Window, SignList {
 
 		this->cur_sign = si->index;
 		this->new_colour.reset();
+#ifdef WITH_INTEGRATION
+		this->renderer_sign_generation = si->GetInstanceGeneration();
+#endif
 
 		this->SetWidgetDirty(WID_QES_TEXT);
 		this->SetWidgetDirty(WID_QES_COLOUR);
 		this->SetFocusedWidget(WID_QES_TEXT);
 	}
+
+#ifdef WITH_INTEGRATION
+	/** The renderer may edit the native target only while this exact incarnation remains editable. */
+	const Sign *RendererEditableSign() const
+	{
+		const Sign *sign = Sign::GetIfValid(this->cur_sign);
+		if (sign == nullptr || sign->GetInstanceGeneration() != this->renderer_sign_generation || !CompanyCanEditSign(sign)) return nullptr;
+		return sign;
+	}
+
+	/** Movement is a separate single command; an empty rename would delete the sign. */
+	bool RendererCanMove() const
+	{
+		const Sign *sign = this->RendererEditableSign();
+		return sign != nullptr && !sign->name.empty() && this->name_editbox.text.GetText() == sign->name && !this->new_colour.has_value();
+	}
+#endif
 
 	/**
 	 * Returns a pointer to the (alphabetically) previous or next sign of the current sign.
@@ -569,6 +598,16 @@ struct SignWindow : Window, SignList {
 	{
 		switch (this->last_user_action) {
 			case WID_QES_MOVE: // Place sign button
+#ifdef WITH_INTEGRATION
+				if (Integration::RendererIsActive()) {
+					/* Keep both Posts out of capture for dirty/empty text. A saved,
+					 * unchanged name needs only the ordinary MoveSign command. */
+					if (!Integration::RendererSignEditorCanMove(this)) {
+						ResetObjectToPlace();
+						return;
+					}
+				} else
+#endif
 				RenameSign(this->cur_sign, this->name_editbox.text.GetText(), this->new_colour.value_or(Colours::Invalid));
 				MoveSign(this->cur_sign, tile);
 				this->Close();
@@ -588,6 +627,33 @@ struct SignWindow : Window, SignList {
 		if (widget == WID_QES_COLOUR) this->new_colour = static_cast<Colours>(index);
 	}
 };
+
+#ifdef WITH_INTEGRATION
+/** Locate only an exact live concrete native Sign editor, never a generic query profile. */
+static const SignWindow *RendererSignEditor(const Window *window)
+{
+	if (window == nullptr || _game_mode != GameMode::Normal || !IsLocalCompany() || !Company::IsValidID(_current_company)) return nullptr;
+	bool live = false;
+	for (const Window *candidate : Window::Iterate()) {
+		if (candidate == window) { live = true; break; }
+	}
+	if (!live || window->window_class != WindowClass::QueryString || window->window_number != QueryStringWindowNumber::Sign) return nullptr;
+	const auto *editor = dynamic_cast<const SignWindow *>(window);
+	if (editor == nullptr || editor->GetQueryString(WID_QES_TEXT) != &editor->name_editbox || editor->RendererEditableSign() == nullptr) return nullptr;
+	return editor;
+}
+
+bool Integration::RendererSignEditorEditable(const Window *window)
+{
+	return RendererSignEditor(window) != nullptr;
+}
+
+bool Integration::RendererSignEditorCanMove(const Window *window)
+{
+	const SignWindow *editor = RendererSignEditor(window);
+	return editor != nullptr && editor->RendererCanMove();
+}
+#endif
 
 static constexpr std::initializer_list<NWidgetPart> _nested_query_sign_edit_widgets = {
 	NWidget(NWID_HORIZONTAL),

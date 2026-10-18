@@ -24,6 +24,9 @@
 #include "tilehighlight_func.h"
 #include "vehicle_base.h"
 #include "story_cmd.h"
+#ifdef WITH_INTEGRATION
+#include "integration/renderer_input.h"
+#endif
 
 #include "widgets/story_widget.h"
 
@@ -588,6 +591,18 @@ protected:
 	}
 
 public:
+
+#ifdef WITH_INTEGRATION
+	StoryPageElementID IntegrationPlacementElement() const
+	{
+		if (_thd.GetCallbackWnd() != this) return StoryPageElementID::Invalid();
+		const StoryPageElement *element = StoryPageElement::GetIfValid(this->active_button_id);
+		if (element == nullptr || element->page != this->selected_page_id ||
+				(element->type != StoryPageElementType::ButtonTile && element->type != StoryPageElementType::ButtonVehicle)) return StoryPageElementID::Invalid();
+		return element->index;
+	}
+#endif
+
 	StoryBookWindow(WindowDesc &desc, WindowNumber window_number) : Window(desc)
 	{
 		this->CreateNestedTree();
@@ -631,7 +646,7 @@ public:
 	void SetSelectedPage(StoryPageID page_index)
 	{
 		if (this->selected_page_id != page_index) {
-			if (this->active_button_id != 0) ResetObjectToPlace();
+			if (this->active_button_id != StoryPageElementID::Invalid()) ResetObjectToPlace();
 			this->active_button_id = StoryPageElementID::Invalid();
 			this->selected_page_id = page_index;
 			this->RefreshSelectedPage();
@@ -1051,3 +1066,11 @@ void ShowStoryBook(CompanyID company, StoryPageID page_id, bool centered)
 	StoryBookWindow *w = AllocateWindowDescFront<StoryBookWindow, true>(centered ? _story_book_gs_desc : _story_book_desc, company);
 	if (page_id != StoryPageID::Invalid()) w->SetSelectedPage(page_id);
 }
+
+#ifdef WITH_INTEGRATION
+StoryPageElementID Integration::RendererStoryPlacementElement(const Window *window)
+{
+	if (window == nullptr || window->window_class != WindowClass::StoryBook) return StoryPageElementID::Invalid();
+	return static_cast<const StoryBookWindow *>(window)->IntegrationPlacementElement();
+}
+#endif

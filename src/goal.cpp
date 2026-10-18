@@ -24,6 +24,10 @@
 #include "network/network_func.h"
 #include "goal_cmd.h"
 #include "script/api/script_event_types.hpp"
+#ifdef WITH_INTEGRATION
+#include "integration/actions_story.h"
+#include "integration/bridge_hooks.h"
+#endif
 
 #include "safeguards.h"
 
@@ -263,6 +267,9 @@ CommandCost CmdGoalQuestion(DoCommandFlags flags, uint16_t uniqueid, uint32_t ta
 	if (type >= GoalQuestionType::End) return CMD_ERROR;
 
 	if (flags.Test(DoCommandFlag::Execute)) {
+#ifdef WITH_INTEGRATION
+		if (Integration::TracksPlayerPresentations()) Integration::StoryQuestionPresented(uniqueid, target, is_client, buttons, type, text);
+#endif
 		if (is_client) {
 			if (client != _network_own_client_id) return CommandCost();
 		} else {
@@ -286,6 +293,12 @@ CommandCost CmdGoalQuestionAnswer(DoCommandFlags flags, uint16_t uniqueid, GoalQ
 {
 	if (button >= GoalQuestionButton::End) return CMD_ERROR;
 
+#ifdef WITH_INTEGRATION
+	if (flags.Test(DoCommandFlag::Execute) && Integration::TracksPlayerPresentations()) {
+		if (_current_company == OWNER_DEITY) Integration::StoryQuestionsClosed(uniqueid);
+		else Integration::StoryQuestionAnswered(_current_company, uniqueid, Integration::ExecutingQuestionGeneration(_current_company, uniqueid));
+	}
+#endif
 	if (_current_company == OWNER_DEITY) {
 		/* It has been requested to close this specific question on all clients */
 		if (flags.Test(DoCommandFlag::Execute)) CloseWindowById(WindowClass::GoalQuestion, uniqueid);

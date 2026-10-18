@@ -18,6 +18,7 @@
 #include "command_func.h"
 #include "viewport_func.h"
 #include "industry.h"
+#include "industry_presentation.h"
 #include "town.h"
 #include "cargo_type.h"
 #include "cheat_type.h"
@@ -94,15 +95,17 @@ static void ShowIndustryCargoesWindow(IndustryType id);
  * @param indspec the industry spec
  * @param suffix is filled with the string to display
  */
-static void GetCargoSuffix(uint cargo, CargoSuffixType cst, const Industry *ind, IndustryType ind_type, const IndustrySpec *indspec, CargoSuffix &suffix)
+static void GetCargoSuffix(uint cargo, CargoSuffixType cst, const Industry *ind, IndustryType ind_type, const IndustrySpec *indspec, CargoSuffix &suffix, IndustryPresentationPsaOverlay *presentation_psa = nullptr)
 {
 	suffix.text.clear();
 	suffix.display = CargoSuffixDisplay::Amount;
 
-	if (indspec->callback_mask.Test(IndustryCallbackMask::CargoSuffix)) {
+	if (indspec->callback_mask.Test(IndustryCallbackMask::CargoSuffix) && indspec->grf_prop.grffile != nullptr) {
 		TileIndex t = (cst != CargoSuffixType::Fund) ? ind->location.tile : INVALID_TILE;
 		std::array<int32_t, 16> regs100;
-		uint16_t callback = GetIndustryCallback(CBID_INDUSTRY_CARGO_SUFFIX, 0, (to_underlying(cst) << 8) | cargo, const_cast<Industry *>(ind), ind_type, t, regs100);
+		uint16_t callback = presentation_psa == nullptr ?
+			GetIndustryCallback(CBID_INDUSTRY_CARGO_SUFFIX, 0, (to_underlying(cst) << 8) | cargo, const_cast<Industry *>(ind), ind_type, t, regs100) :
+			GetIndustryCallbackForObservation(CBID_INDUSTRY_CARGO_SUFFIX, 0, (to_underlying(cst) << 8) | cargo, const_cast<Industry *>(ind), ind_type, t, regs100, *presentation_psa);
 		if (callback == CALLBACK_FAILED) return;
 
 		if (indspec->grf_prop.grffile->grf_version < 8) {
@@ -112,7 +115,7 @@ static void GetCargoSuffix(uint cargo, CargoSuffixType cst, const Industry *ind,
 				suffix.display = CargoSuffixDisplay::AmountAndText;
 				return;
 			}
-			ErrorUnknownCallbackResult(indspec->grf_prop.grfid, CBID_INDUSTRY_CARGO_SUFFIX, callback);
+			if (presentation_psa == nullptr) ErrorUnknownCallbackResult(indspec->grf_prop.grfid, CBID_INDUSTRY_CARGO_SUFFIX, callback);
 			return;
 
 		} else { // GRF version 8 or higher.
@@ -143,7 +146,7 @@ static void GetCargoSuffix(uint cargo, CargoSuffixType cst, const Industry *ind,
 				suffix.display = CargoSuffixDisplay::Text;
 				return;
 			}
-			ErrorUnknownCallbackResult(indspec->grf_prop.grfid, CBID_INDUSTRY_CARGO_SUFFIX, callback);
+			if (presentation_psa == nullptr) ErrorUnknownCallbackResult(indspec->grf_prop.grfid, CBID_INDUSTRY_CARGO_SUFFIX, callback);
 			return;
 		}
 	}
@@ -217,20 +220,89 @@ static inline void GetAllCargoSuffixes(CargoSuffixDirection use_input, CargoSuff
  * @param slot accepts/produced slot number, used for old-style 3-in/2-out industries.
  * @param suffix is filled with the suffix
  */
-void GetCargoSuffix(CargoSuffixDirection use_input, CargoSuffixType cst, const Industry *ind, IndustryType ind_type, const IndustrySpec *indspec, CargoType cargo, uint8_t slot, CargoSuffix &suffix)
+void GetCargoSuffix(CargoSuffixDirection use_input, CargoSuffixType cst, const Industry *ind, IndustryType ind_type, const IndustrySpec *indspec, CargoType cargo, uint8_t slot, CargoSuffix &suffix, IndustryPresentationPsaOverlay *presentation_psa = nullptr)
 {
 	suffix.text.clear();
 	suffix.display = CargoSuffixDisplay::None;
 	if (!IsValidCargoType(cargo)) return;
 	if (indspec->behaviour.Test(IndustryBehaviour::CargoTypesUnlimited)) {
+		if (indspec->grf_prop.grffile == nullptr) return;
 		uint8_t local_id = indspec->grf_prop.grffile->cargo_map[cargo]; // should we check the value for valid?
 		uint cargotype = local_id << 16 | to_underlying(use_input);
-		GetCargoSuffix(cargotype, cst, ind, ind_type, indspec, suffix);
+		GetCargoSuffix(cargotype, cst, ind, ind_type, indspec, suffix, presentation_psa);
 	} else if (use_input == CargoSuffixDirection::In) {
-		if (slot < INDUSTRY_ORIGINAL_NUM_INPUTS) GetCargoSuffix(slot, cst, ind, ind_type, indspec, suffix);
+		if (slot < INDUSTRY_ORIGINAL_NUM_INPUTS) GetCargoSuffix(slot, cst, ind, ind_type, indspec, suffix, presentation_psa);
 	} else if (use_input == CargoSuffixDirection::Out) {
-		if (slot < INDUSTRY_ORIGINAL_NUM_OUTPUTS) GetCargoSuffix(slot + INDUSTRY_ORIGINAL_NUM_INPUTS, cst, ind, ind_type, indspec, suffix);
+		if (slot < INDUSTRY_ORIGINAL_NUM_OUTPUTS) GetCargoSuffix(slot + INDUSTRY_ORIGINAL_NUM_INPUTS, cst, ind, ind_type, indspec, suffix, presentation_psa);
 	}
+}
+
+/** Compose one accepted line using the exact IndustryView suffix and stockpiling rules. */
+static std::string RenderAcceptedIndustryLine(const Industry &industry, const IndustrySpec &spec, uint8_t slot, IndustryPresentationPsaOverlay *presentation_psa)
+{
+	const auto &accepted = industry.accepted[slot];
+	CargoSuffix suffix;
+	GetCargoSuffix(CargoSuffixDirection::In, CargoSuffixType::View, &industry, industry.type, &spec, accepted.cargo, slot, suffix, presentation_psa);
+	bool stockpiling = spec.callback_mask.Any({IndustryCallbackMask::ProductionCargoArrival, IndustryCallbackMask::Production256Ticks});
+	if (!stockpiling && suffix.display == CargoSuffixDisplay::AmountAndText) suffix.display = CargoSuffixDisplay::Text;
+	if (!stockpiling && suffix.display == CargoSuffixDisplay::Amount) suffix.display = CargoSuffixDisplay::None;
+
+	auto params = MakeParameters(CargoSpec::Get(accepted.cargo)->name, accepted.cargo, accepted.waiting, suffix.text);
+	switch (suffix.display) {
+		case CargoSuffixDisplay::AmountAndText: return GetStringWithArgs(STR_INDUSTRY_VIEW_ACCEPT_CARGO_AMOUNT_SUFFIX, params);
+		case CargoSuffixDisplay::Text: return GetStringWithArgs(STR_INDUSTRY_VIEW_ACCEPT_CARGO_SUFFIX, params);
+		case CargoSuffixDisplay::Amount: return GetStringWithArgs(STR_INDUSTRY_VIEW_ACCEPT_CARGO_AMOUNT_NOSUFFIX, params);
+		case CargoSuffixDisplay::None: return GetStringWithArgs(STR_INDUSTRY_VIEW_ACCEPT_CARGO_NOSUFFIX, params);
+		default: NOT_REACHED();
+	}
+}
+
+/** Compose one produced line; the view always shows last-month amount and transport percentage. */
+static std::string RenderProducedIndustryLine(const Industry &industry, const IndustrySpec &spec, uint8_t slot, IndustryPresentationPsaOverlay *presentation_psa)
+{
+	const auto &produced = industry.produced[slot];
+	CargoSuffix suffix;
+	GetCargoSuffix(CargoSuffixDirection::Out, CargoSuffixType::View, &industry, industry.type, &spec, produced.cargo, slot, suffix, presentation_psa);
+	return GetString(STR_INDUSTRY_VIEW_TRANSPORTED, produced.cargo, produced.history[LAST_MONTH].production, suffix.text, ToPercent8(produced.history[LAST_MONTH].PctTransported()));
+}
+
+/** Decode the view-only callback text after the cargo callbacks have run. */
+static std::string RenderIndustryExtraText(const Industry &industry, const IndustrySpec &spec, IndustryPresentationPsaOverlay *presentation_psa)
+{
+	if (!spec.callback_mask.Test(IndustryCallbackMask::WindowMoreText) || spec.grf_prop.grffile == nullptr) return {};
+	std::array<int32_t, 16> regs100;
+	uint16_t result = presentation_psa == nullptr ?
+		GetIndustryCallback(CBID_INDUSTRY_WINDOW_MORE_TEXT, 0, 0, const_cast<Industry *>(&industry), industry.type, industry.location.tile, regs100) :
+		GetIndustryCallbackForObservation(CBID_INDUSTRY_WINDOW_MORE_TEXT, 0, 0, const_cast<Industry *>(&industry), industry.type, industry.location.tile, regs100, *presentation_psa);
+	if (result == CALLBACK_FAILED || result == 0x400) return {};
+	if (result == 0x40F) return GetGRFStringWithTextStack(spec.grf_prop.grffile, static_cast<GRFStringID>(regs100[0]), std::span{regs100}.subspan(1));
+	if (result < 0x400) return GetGRFStringWithTextStack(spec.grf_prop.grffile, GRFSTR_MISC_GRF_TEXT + result, regs100);
+	if (presentation_psa == nullptr) ErrorUnknownCallbackResult(spec.grf_prop.grfid, CBID_INDUSTRY_WINDOW_MORE_TEXT, result);
+	return {};
+}
+
+/** Replay the view in draw order with one shadow PSA, stopping after the selected source. */
+std::string RenderIndustryDisplayText(const Industry &industry, IndustryDisplayTextKind kind, uint8_t slot)
+{
+	const IndustrySpec &spec = *GetIndustrySpec(industry.type);
+	if (kind == IndustryDisplayTextKind::Name) return industry.town == nullptr ? GetString(spec.name) : GetString(STR_INDUSTRY_NAME, industry.index);
+	if (kind == IndustryDisplayTextKind::CustomText) return industry.text.GetDecodedString();
+
+	IndustryPresentationPsaOverlay presentation_psa(&industry, industry.town, spec.grf_prop.grffile == nullptr ? GrfID{} : spec.grf_prop.grffile->grfid);
+	for (uint8_t j = 0; j < industry.accepted.size(); j++) {
+		if (!IsValidCargoType(industry.accepted[j].cargo)) continue;
+		std::string line = RenderAcceptedIndustryLine(industry, spec, j, &presentation_psa);
+		if (kind == IndustryDisplayTextKind::AcceptedLine && j == slot) return line;
+	}
+	if (kind == IndustryDisplayTextKind::AcceptedLine) return {};
+	for (uint8_t j = 0; j < industry.produced.size(); j++) {
+		if (!IsValidCargoType(industry.produced[j].cargo)) continue;
+		std::string line = RenderProducedIndustryLine(industry, spec, j, &presentation_psa);
+		if (kind == IndustryDisplayTextKind::ProducedLine && j == slot) return line;
+	}
+	if (kind == IndustryDisplayTextKind::ProducedLine) return {};
+	if (kind == IndustryDisplayTextKind::ExtraText) return RenderIndustryExtraText(industry, spec, &presentation_psa);
+	return {};
 }
 
 std::array<IndustryType, NUM_INDUSTRYTYPES> _sorted_industry_types; ///< Industry types sorted by name.
@@ -858,18 +930,6 @@ public:
 		DrawSprite(icon, PAL_NONE, CentreBounds(ir.left, ir.right, d.width), CentreBounds(ir.top, ir.bottom, this->cargo_icon_size.height));
 	}
 
-	std::string GetAcceptedCargoString(const Industry::AcceptedCargo &ac, const CargoSuffix &suffix) const
-	{
-		auto params = MakeParameters(CargoSpec::Get(ac.cargo)->name, ac.cargo, ac.waiting, suffix.text);
-		switch (suffix.display) {
-			case CargoSuffixDisplay::AmountAndText: return GetStringWithArgs(STR_INDUSTRY_VIEW_ACCEPT_CARGO_AMOUNT_SUFFIX, params);
-			case CargoSuffixDisplay::Text: return GetStringWithArgs(STR_INDUSTRY_VIEW_ACCEPT_CARGO_SUFFIX, params);
-			case CargoSuffixDisplay::Amount: return GetStringWithArgs(STR_INDUSTRY_VIEW_ACCEPT_CARGO_AMOUNT_NOSUFFIX, params);
-			case CargoSuffixDisplay::None: return GetStringWithArgs(STR_INDUSTRY_VIEW_ACCEPT_CARGO_NOSUFFIX, params);
-			default: NOT_REACHED();
-		}
-	}
-
 	/**
 	 * Draw the text in the #WID_IV_INFO panel.
 	 * @param r Rectangle of the panel.
@@ -893,8 +953,6 @@ public:
 		}
 
 		const int label_indent = WidgetDimensions::scaled.hsep_normal + this->cargo_icon_size.width;
-		bool stockpiling = ind->callback_mask.Any({IndustryCallbackMask::ProductionCargoArrival, IndustryCallbackMask::Production256Ticks});
-
 		for (const auto &a : i->accepted) {
 			if (!IsValidCargoType(a.cargo)) continue;
 			has_accept = true;
@@ -906,13 +964,7 @@ public:
 
 			DrawCargoIcon(ir, a.cargo);
 
-			CargoSuffix suffix;
-			GetCargoSuffix(CargoSuffixDirection::In, CargoSuffixType::View, i, i->type, ind, a.cargo, &a - i->accepted.data(), suffix);
-			/* if the industry is not stockpiling then don't show amount in the acceptance display. */
-			if (!stockpiling && suffix.display == CargoSuffixDisplay::AmountAndText) suffix.display = CargoSuffixDisplay::Text;
-			if (!stockpiling && suffix.display == CargoSuffixDisplay::Amount) suffix.display = CargoSuffixDisplay::None;
-
-			DrawString(ir.Indent(label_indent, rtl), this->GetAcceptedCargoString(a, suffix));
+			DrawString(ir.Indent(label_indent, rtl), RenderAcceptedIndustryLine(*i, *ind, &a - i->accepted.data(), nullptr));
 			ir.top += GetCharacterHeight(FontSize::Normal);
 		}
 
@@ -932,11 +984,8 @@ public:
 
 			DrawCargoIcon(ir, p.cargo);
 
-			CargoSuffix suffix;
-			GetCargoSuffix(CargoSuffixDirection::Out, CargoSuffixType::View, i, i->type, ind, p.cargo, &p - i->produced.data(), suffix);
-
 			DrawString(ir.Indent(label_indent + (this->editable == Editability::Rate ? SETTING_BUTTON_WIDTH + WidgetDimensions::scaled.hsep_normal : 0), rtl).Translate(0, text_y_offset),
-				GetString(STR_INDUSTRY_VIEW_TRANSPORTED, p.cargo, p.history[LAST_MONTH].production, suffix.text, ToPercent8(p.history[LAST_MONTH].PctTransported())));
+				RenderProducedIndustryLine(*i, *ind, &p - i->produced.data(), nullptr));
 			/* Let's put out those buttons.. */
 			if (this->editable == Editability::Rate) {
 				DrawArrowButtons(ir.Indent(label_indent, rtl).WithWidth(SETTING_BUTTON_WIDTH, rtl).left, ir.top + button_y_offset, Colours::Yellow, (this->clicked_line == &p - i->produced.data()) ? this->clicked_button : 0,
@@ -959,24 +1008,11 @@ public:
 			ir.top += line_height;
 		}
 
-		/* Get the extra message for the GUI */
-		if (ind->callback_mask.Test(IndustryCallbackMask::WindowMoreText)) {
-			std::array<int32_t, 16> regs100;
-			uint16_t callback_res = GetIndustryCallback(CBID_INDUSTRY_WINDOW_MORE_TEXT, 0, 0, i, i->type, i->location.tile, regs100);
-			if (callback_res != CALLBACK_FAILED && callback_res != 0x400) {
-				std::string str;
-				if (callback_res == 0x40F) {
-					str = GetGRFStringWithTextStack(ind->grf_prop.grffile, static_cast<GRFStringID>(regs100[0]), std::span{regs100}.subspan(1));
-				} else if (callback_res > 0x400) {
-					ErrorUnknownCallbackResult(ind->grf_prop.grfid, CBID_INDUSTRY_WINDOW_MORE_TEXT, callback_res);
-				} else {
-					str = GetGRFStringWithTextStack(ind->grf_prop.grffile, GRFSTR_MISC_GRF_TEXT + callback_res, regs100);
-				}
-				if (!str.empty()) {
-					ir.top += WidgetDimensions::scaled.vsep_wide;
-					ir.top = DrawStringMultiLine(ir, str, TextColour::Yellow);
-				}
-			}
+		/* Get the extra message for the GUI. */
+		std::string extra_text = RenderIndustryExtraText(*i, *ind, nullptr);
+		if (!extra_text.empty()) {
+			ir.top += WidgetDimensions::scaled.vsep_wide;
+			ir.top = DrawStringMultiLine(ir, extra_text, TextColour::Yellow);
 		}
 
 		if (!i->text.empty()) {

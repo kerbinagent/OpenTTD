@@ -12,6 +12,9 @@ add_subdirectory(blitter)
 add_subdirectory(core)
 add_subdirectory(fontcache)
 add_subdirectory(game)
+if(OPTION_INTEGRATION)
+    add_subdirectory(integration)
+endif()
 add_subdirectory(lang)
 add_subdirectory(linkgraph)
 add_subdirectory(misc)
@@ -243,6 +246,7 @@ add_files(
     industry_cmd.cpp
     industry_cmd.h
     industry_gui.cpp
+    industry_presentation.h
     industry_map.h
     industry_type.h
     industrytype.h

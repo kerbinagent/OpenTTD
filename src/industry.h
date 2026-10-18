@@ -329,5 +329,7 @@ enum IndustryDirectoryInvalidateWindowData : uint8_t {
 };
 
 void TrimIndustryAcceptedProduced(Industry *ind);
+struct IndustryPresentationPsaOverlay;
+void AddAcceptedCargoOfIndustryForObservation(TileIndex tile, CargoArray &acceptance, CargoTypes &always_accepted, IndustryPresentationPsaOverlay &presentation_psa);
 
 #endif /* INDUSTRY_H */

@@ -98,6 +98,10 @@ struct CommandPacket {
 	StringID err_msg{}; ///< string ID of error message to use.
 	CommandCallback *callback = nullptr; ///< any callback function executed upon successful completion of the command.
 	CommandDataBuffer data{}; ///< command parameters.
+#ifdef WITH_INTEGRATION
+	uint64_t integration_token = 0; ///< Server-local correlation, never part of the native wire protocol.
+	ClientID integration_owner = ClientID::Invalid; ///< Re-resolved native renderer owner; never a saved socket pointer.
+#endif
 };
 
 void NetworkDistributeCommands();

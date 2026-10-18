@@ -40,6 +40,9 @@ protected:
 	friend void NetworkExecuteLocalCommandQueue();
 	friend void NetworkClose(bool close_admins);
 	static ClientNetworkGameSocketHandler *my_client; ///< This is us!
+#ifdef WITH_INTEGRATION
+	size_t renderer_queued_bytes = 0; ///< Bounded replay buffering while a private renderer is parked.
+#endif
 
 	NetworkRecvStatus ReceiveServerFull(Packet &p) override;
 	NetworkRecvStatus ReceiveServerBanned(Packet &p) override;

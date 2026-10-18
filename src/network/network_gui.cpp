@@ -53,6 +53,13 @@
 #	include <emscripten.h>
 #endif
 
+#ifdef WITH_INTEGRATION
+#include "../integration/renderer_input.h"
+#include "../integration/bridge_hooks.h"
+#include "../3rdparty/monocypher/monocypher.h"
+#include "../misc/endian_buffer.hpp"
+#endif
+
 #include "../safeguards.h"
 
 static void ShowNetworkStartServerWindow();
@@ -1352,6 +1359,11 @@ static void AdminCompanyResetCallback(Window *, bool confirmed)
  */
 class ButtonCommon {
 public:
+#ifdef WITH_INTEGRATION
+	Integration::ClientListAccessKind access_kind = Integration::ClientListAccessKind::Denied;
+	CompanyID access_company = CompanyID::Invalid();
+	ClientID access_client = ClientID::Invalid;
+#endif
 	SpriteID sprite;   ///< The sprite to use on the button.
 	StringID tooltip;  ///< The tooltip of the button.
 	Colours colour;    ///< The colour of the button.
@@ -1431,6 +1443,9 @@ using ClientButton = Button<ClientID>; ///< Button linked to a client.
  */
 class ButtonLine {
 public:
+#ifdef WITH_INTEGRATION
+	virtual CommandDataBuffer AccessRowData() const = 0;
+#endif
 	std::vector<std::unique_ptr<ButtonCommon>> buttons{}; ///< Buttons for this line.
 
 	/** Ensure the destructor of the sub classes are called as well. */
@@ -1513,6 +1528,14 @@ public:
 	 * @param company_id The company to show on the line.
 	 */
 	CompanyButtonLine(CompanyID company_id) : company_id(company_id) {}
+#ifdef WITH_INTEGRATION
+	CommandDataBuffer AccessRowData() const override
+	{
+		const Company *company = Company::GetIfValid(this->company_id);
+		return EndianBufferWriter<CommandDataBuffer>::FromValue(std::tuple{uint8_t{0}, this->company_id.base(), company == nullptr ? uint64_t{0} : company->GetInstanceGeneration(), company == nullptr ? std::string{} : GetString(STR_COMPANY_NAME, company->index, company->index)});
+	}
+#endif
+
 
 	void Draw(Rect r) const override
 	{
@@ -1545,6 +1568,15 @@ public:
 	 * @param client_pool_id The index into the client pool of client to show on this line.
 	 */
 	ClientButtonLine(ClientPoolID client_pool_id) : client_pool_id(client_pool_id) {}
+#ifdef WITH_INTEGRATION
+	CommandDataBuffer AccessRowData() const override
+	{
+		const NetworkClientInfo *info = NetworkClientInfo::GetIfValid(this->client_pool_id);
+		if (info == nullptr) return {};
+		return EndianBufferWriter<CommandDataBuffer>::FromValue(std::tuple{uint8_t{1}, this->client_pool_id.base(), to_underlying(info->client_id), info->GetInstanceGeneration(), info->public_key, info->client_name, info->client_playas.base()});
+	}
+#endif
+
 
 	void Draw(Rect r) const override
 	{
@@ -1684,12 +1716,15 @@ private:
 	 */
 	static void OnClickCompanyAdmin(NetworkClientListWindow *w, Point pt, CompanyID company_id)
 	{
+		if (!Company::IsValidID(company_id)) return;
 		DropDownList list;
 		if (_network_server) list.push_back(MakeDropDownListStringItem(STR_NETWORK_CLIENT_LIST_ADMIN_COMPANY_RESET, to_underlying(DropDownAction::AdminResetCompany), NetworkCompanyHasClients(company_id)));
 		if (const Company *c = Company::GetIfValid(company_id); c != nullptr && !c->is_ai) {
 			list.push_back(MakeDropDownListStringItem(STR_NETWORK_CLIENT_LIST_ADMIN_COMPANY_ALLOW_ANY, to_underlying(DropDownAction::CompanyAllowAny), c->allow_any));
 			list.push_back(MakeDropDownListStringItem(STR_NETWORK_CLIENT_LIST_ADMIN_COMPANY_ALLOW_LISTED, to_underlying(DropDownAction::CompanyAllowListed), !c->allow_any));
 		}
+
+		if (list.empty()) return;
 
 		Rect wi_rect;
 		wi_rect.left   = pt.x;
@@ -1698,7 +1733,12 @@ private:
 		wi_rect.bottom = pt.y;
 
 		w->dd_company_id = company_id;
-		ShowDropDownListAt(w, std::move(list), -1, WID_CL_MATRIX, wi_rect, Colours::Grey, DropDownOption::InstantClose);
+		DropDownOptions options = DropDownOption::InstantClose;
+#ifdef WITH_INTEGRATION
+		/* A screenshot gesture opens the menu; a later screenshot selects it. */
+		if (Integration::RendererIsActive()) options = {};
+#endif
+		ShowDropDownListAt(w, std::move(list), -1, WID_CL_MATRIX, wi_rect, Colours::Grey, options);
 	}
 
 	/**
@@ -1716,8 +1756,20 @@ private:
 	 */
 	static void OnClickClientAuthorize(NetworkClientListWindow *, Point, ClientID client_id)
 	{
-		AutoRestoreBackup cur_company(_current_company, NetworkClientInfo::GetByClientID(_network_own_client_id)->client_playas);
-		Command<Commands::CompanyAllowListControl>::Post(CompanyAllowListCtrlAction::AddKey, NetworkClientInfo::GetByClientID(client_id)->public_key);
+		const auto *own = NetworkClientInfo::GetByClientID(_network_own_client_id);
+		const auto *target = NetworkClientInfo::GetByClientID(client_id);
+		if (own == nullptr || target == nullptr || !Company::IsValidID(own->client_playas)) return;
+		AutoRestoreBackup cur_company(_current_company, own->client_playas);
+		Command<Commands::CompanyAllowListControl>::Post(CompanyAllowListCtrlAction::AddKey, target->public_key);
+	}
+
+	static void OnClickClientRevoke(NetworkClientListWindow *, Point, ClientID client_id)
+	{
+		const auto *own = NetworkClientInfo::GetByClientID(_network_own_client_id);
+		const auto *target = NetworkClientInfo::GetByClientID(client_id);
+		if (own == nullptr || target == nullptr || !Company::IsValidID(own->client_playas)) return;
+		AutoRestoreBackup cur_company(_current_company, own->client_playas);
+		Command<Commands::CompanyAllowListControl>::Post(CompanyAllowListCtrlAction::RemoveKey, target->public_key);
 	}
 
 	/**
@@ -1730,7 +1782,15 @@ private:
 	{
 		ButtonLine &company_line = *this->buttons.emplace_back(std::make_unique<CompanyButtonLine>(company_id));
 		if (_network_server || company_id == _local_company) {
-			company_line.AddButton<CompanyButton>(SPR_ADMIN, STR_NETWORK_CLIENT_LIST_ADMIN_COMPANY_TOOLTIP, Colours::Red, company_id, &NetworkClientListWindow::OnClickCompanyAdmin, company_id == COMPANY_SPECTATOR);
+			auto &policy_button = company_line.AddButton<CompanyButton>(SPR_ADMIN, STR_NETWORK_CLIENT_LIST_ADMIN_COMPANY_TOOLTIP, Colours::Red, company_id, &NetworkClientListWindow::OnClickCompanyAdmin, company_id == COMPANY_SPECTATOR);
+#ifdef WITH_INTEGRATION
+			if (company_id == _local_company && Company::IsValidID(company_id) && !Company::Get(company_id)->is_ai) {
+				policy_button.access_kind = Integration::ClientListAccessKind::OwnPolicyMenu;
+				policy_button.access_company = company_id;
+			}
+#else
+			(void)policy_button;
+#endif
 		}
 		ButtonCommon &chat_button = company_line.AddButton<CompanyButton>(SPR_CHAT, company_id == COMPANY_SPECTATOR ? STR_NETWORK_CLIENT_LIST_CHAT_SPECTATOR_TOOLTIP : STR_NETWORK_CLIENT_LIST_CHAT_COMPANY_TOOLTIP, Colours::Orange, company_id, &NetworkClientListWindow::OnClickCompanyChat);
 		if (can_join_company) company_line.AddButton<CompanyButton>(SPR_JOIN, STR_NETWORK_CLIENT_LIST_JOIN_TOOLTIP, Colours::Orange, company_id, &NetworkClientListWindow::OnClickCompanyJoin, company_id != COMPANY_SPECTATOR && Company::Get(company_id)->is_ai);
@@ -1743,7 +1803,19 @@ private:
 			ButtonLine &line = *this->buttons.emplace_back(std::make_unique<ClientButtonLine>(ci->index));
 			if (_network_server) line.AddButton<ClientButton>(SPR_ADMIN, STR_NETWORK_CLIENT_LIST_ADMIN_CLIENT_TOOLTIP, Colours::Red, ci->client_id, &NetworkClientListWindow::OnClickClientAdmin, _network_own_client_id == ci->client_id);
 			if (_network_own_client_id != ci->client_id) line.AddButton<ClientButton>(SPR_CHAT, STR_NETWORK_CLIENT_LIST_CHAT_CLIENT_TOOLTIP, Colours::Orange, ci->client_id, &NetworkClientListWindow::OnClickClientChat);
-			if (_network_own_client_id != ci->client_id && client_playas != COMPANY_SPECTATOR && !ci->CanJoinCompany(client_playas)) line.AddButton<ClientButton>(SPR_JOIN, STR_NETWORK_CLIENT_LIST_COMPANY_AUTHORIZE_TOOLTIP, Colours::Green, ci->client_id, &NetworkClientListWindow::OnClickClientAuthorize);
+			if (ci->client_id != ClientID::Invalid && ci->client_id != ClientID::Server && _network_own_client_id != ci->client_id && Company::IsValidID(client_playas)) {
+				bool listed = Company::Get(client_playas)->allow_list.Contains(ci->public_key);
+				auto &access_button = listed ?
+					line.AddButton<ClientButton>(SPR_IMG_REMOVE, STR_NETWORK_CLIENT_LIST_COMPANY_REVOKE_TOOLTIP, Colours::Red, ci->client_id, &NetworkClientListWindow::OnClickClientRevoke) :
+					line.AddButton<ClientButton>(SPR_JOIN, STR_NETWORK_CLIENT_LIST_COMPANY_AUTHORIZE_TOOLTIP, Colours::Green, ci->client_id, &NetworkClientListWindow::OnClickClientAuthorize);
+#ifdef WITH_INTEGRATION
+				access_button.access_kind = listed ? Integration::ClientListAccessKind::Revoke : Integration::ClientListAccessKind::Authorize;
+				access_button.access_company = client_playas;
+				access_button.access_client = ci->client_id;
+#else
+				(void)access_button;
+#endif
+			}
 		}
 
 		/* Disable the chat button when there are no players in this company. */
@@ -1784,6 +1856,48 @@ private:
 	}
 
 public:
+#ifdef WITH_INTEGRATION
+	std::string AccessVersion() const
+	{
+		crypto_blake2b_ctx hash;
+		crypto_blake2b_init(&hash, 32);
+		auto append = [&](const auto &value) {
+			auto bytes = EndianBufferWriter<CommandDataBuffer>::FromValue(value);
+			crypto_blake2b_update(&hash, bytes.data(), bytes.size());
+		};
+		append(std::string("OpenTTD native client-list PNG v1"));
+		append(_current_text_dir == TD_RTL);
+		append(std::tuple{this->vscroll->GetPosition(), this->vscroll->GetCapacity(), this->line_height, this->buttons.size()});
+		const auto rect = this->GetWidget<NWidgetBase>(WID_CL_MATRIX)->GetCurrentRect();
+		append(std::tuple{rect.left, rect.top, rect.right, rect.bottom});
+		for (const auto &row : this->buttons) {
+			auto row_bytes = row->AccessRowData();
+			append(static_cast<uint32_t>(row_bytes.size()));
+			crypto_blake2b_update(&hash, row_bytes.data(), row_bytes.size());
+			append(static_cast<uint32_t>(row->buttons.size()));
+			for (const auto &button : row->buttons) append(std::tuple{to_underlying(button->access_kind), button->access_company.base(), to_underlying(button->access_client), button->disabled, button->width, button->height, button->sprite});
+		}
+		std::array<uint8_t, 32> digest;
+		crypto_blake2b_final(&hash, digest.data());
+		return FormatArrayAsHex(digest);
+	}
+
+	std::optional<Integration::ClientListAccessTarget> AccessTargetAt(Point pt) const
+	{
+		auto it = this->vscroll->GetScrolledItemFromWidget(this->buttons, pt.y, this, WID_CL_MATRIX);
+		if (it == this->buttons.end()) return std::nullopt;
+		const auto rect = this->GetWidget<NWidgetBase>(WID_CL_MATRIX)->GetCurrentRect().Shrink(WidgetDimensions::scaled.framerect);
+		const ButtonCommon *button = (*it)->GetButton(rect, pt);
+		if (button == nullptr || button->disabled || button->access_kind == Integration::ClientListAccessKind::Denied || button->access_company != _local_company) return std::nullopt;
+		Integration::ClientListAccessTarget target{button->access_kind, button->access_company, button->access_client, 0, {}};
+		if (target.kind != Integration::ClientListAccessKind::OwnPolicyMenu) {
+			const auto *info = NetworkClientInfo::GetByClientID(target.client);
+			if (info == nullptr || target.client == ClientID::Invalid || target.client == ClientID::Server || target.client == _network_own_client_id) return std::nullopt;
+			target.local_generation = info->GetInstanceGeneration(); target.key = info->public_key;
+		}
+		return target;
+	}
+#endif
 	/**
 	 * Create the window.
 	 * @param desc The description of the window.
@@ -2073,6 +2187,20 @@ public:
 };
 
 /** Open the client list window. */
+#ifdef WITH_INTEGRATION
+std::string Integration::NetworkClientListAccessVersion(const Window *window)
+{
+	if (window == nullptr || window->window_class != WindowClass::NetworkClientList) return {};
+	return static_cast<const NetworkClientListWindow *>(window)->AccessVersion();
+}
+
+std::optional<Integration::ClientListAccessTarget> Integration::NetworkClientListAccessTargetAt(const Window *window, Point relative)
+{
+	if (window == nullptr || window->window_class != WindowClass::NetworkClientList) return std::nullopt;
+	return static_cast<const NetworkClientListWindow *>(window)->AccessTargetAt(relative);
+}
+#endif
+
 void ShowClientList()
 {
 	AllocateWindowDescFront<NetworkClientListWindow>(_client_list_desc, 0);

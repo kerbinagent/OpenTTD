@@ -551,7 +551,7 @@ static void ShowRejectOrAcceptNews(const Station *st, CargoTypes cargoes, bool r
  * @param rad Search radius in addition to the given area
  * @return Array of production per cargo type.
  */
-CargoArray GetProductionAroundTiles(TileIndex north_tile, int w, int h, int rad)
+CargoArray GetProductionAroundTiles(TileIndex north_tile, int w, int h, int rad, IndustryPresentationPsaOverlay *presentation_psa)
 {
 	CargoArray produced{};
 	FlatSet<IndustryID> industries;
@@ -561,7 +561,11 @@ CargoArray GetProductionAroundTiles(TileIndex north_tile, int w, int h, int rad)
 	 * everything except industries */
 	for (TileIndex tile : ta) {
 		if (IsTileType(tile, TileType::Industry)) industries.insert(GetIndustryIndex(tile));
-		AddProducedCargo(tile, produced);
+		if (presentation_psa != nullptr && IsTileType(tile, TileType::House)) {
+			AddProducedCargoOfHouseForObservation(tile, produced, *presentation_psa);
+		} else {
+			AddProducedCargo(tile, produced);
+		}
 	}
 
 	/* Loop over the seen industries. They produce cargo for
@@ -588,7 +592,7 @@ CargoArray GetProductionAroundTiles(TileIndex north_tile, int w, int h, int rad)
  * @param rad Search radius in addition to given area
  * @return Cargo array of accepted cargo types and bitmask of cargo accepted by houses and headquarters.
  */
-std::pair<CargoArray, CargoTypes> GetAcceptanceAroundTiles(TileIndex center_tile, int w, int h, int rad)
+std::pair<CargoArray, CargoTypes> GetAcceptanceAroundTiles(TileIndex center_tile, int w, int h, int rad, IndustryPresentationPsaOverlay *presentation_psa)
 {
 	CargoArray acceptance{};
 	CargoTypes always_accepted{};
@@ -599,7 +603,13 @@ std::pair<CargoArray, CargoTypes> GetAcceptanceAroundTiles(TileIndex center_tile
 		/* Ignore industry if it has a neutral station. */
 		if (!_settings_game.station.serve_neutral_industries && IsTileType(tile, TileType::Industry) && Industry::GetByTile(tile)->neutral_station != nullptr) continue;
 
-		AddAcceptedCargo(tile, acceptance, always_accepted);
+		if (presentation_psa != nullptr && IsTileType(tile, TileType::House)) {
+			AddAcceptedCargoOfHouseForObservation(tile, acceptance, always_accepted, *presentation_psa);
+		} else if (presentation_psa != nullptr && IsTileType(tile, TileType::Industry)) {
+			AddAcceptedCargoOfIndustryForObservation(tile, acceptance, always_accepted, *presentation_psa);
+		} else {
+			AddAcceptedCargo(tile, acceptance, always_accepted);
+		}
 	}
 
 	return {acceptance, always_accepted};
@@ -1520,7 +1530,7 @@ CommandCost CmdBuildRailStation(DoCommandFlags flags, TileIndex tile_org, RailTy
 		/* Check if the station is buildable */
 		if (statspec->callback_mask.Test(StationCallbackMask::Avail)) {
 			uint16_t cb_res = GetStationCallback(CBID_STATION_AVAILABILITY, 0, 0, statspec, nullptr, INVALID_TILE);
-			if (cb_res != CALLBACK_FAILED && !Convert8bitBooleanCallback(statspec->grf_prop.grffile, CBID_STATION_AVAILABILITY, cb_res)) return CMD_ERROR;
+			if (cb_res != CALLBACK_FAILED && !Convert8bitBooleanCallback(statspec->grf_prop.grffile, CBID_STATION_AVAILABILITY, cb_res, !flags.Test(DoCommandFlag::QueryCost))) return CMD_ERROR;
 		}
 	}
 
@@ -2137,7 +2147,7 @@ CommandCost CmdBuildRoadStop(DoCommandFlags flags, TileIndex tile, uint8_t width
 		/* Check if the road stop is buildable */
 		if (roadstopspec->callback_mask.Test(RoadStopCallbackMask::Avail)) {
 			uint16_t cb_res = GetRoadStopCallback(CBID_STATION_AVAILABILITY, 0, 0, roadstopspec, nullptr, INVALID_TILE, rt, is_truck_stop ? StationType::Truck : StationType::Bus, 0);
-			if (cb_res != CALLBACK_FAILED && !Convert8bitBooleanCallback(roadstopspec->grf_prop.grffile, CBID_STATION_AVAILABILITY, cb_res)) return CMD_ERROR;
+			if (cb_res != CALLBACK_FAILED && !Convert8bitBooleanCallback(roadstopspec->grf_prop.grffile, CBID_STATION_AVAILABILITY, cb_res, !flags.Test(DoCommandFlag::QueryCost))) return CMD_ERROR;
 		}
 	}
 

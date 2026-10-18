@@ -13,6 +13,35 @@
 #include "gfx_type.h"
 #include "dropdown_type.h"
 
+#include <cstdint>
+#include <optional>
+
+struct Window;
+struct SettingEntry;
+struct IntSettingDesc;
+
+/** Finite hit classification for the native Game Options company-policy view. */
+enum class GameOptionsHitKind : uint8_t {
+	Denied,
+	Navigation,
+	Setting,
+};
+
+/** Exact native row identity; callers must check the company-policy registry. */
+struct GameOptionsSettingState {
+	const SettingEntry *entry = nullptr;
+	const IntSettingDesc *descriptor = nullptr;
+};
+
+struct GameOptionsHit {
+	GameOptionsHitKind kind = GameOptionsHitKind::Denied;
+	GameOptionsSettingState setting{};
+};
+
+GameOptionsHit ClassifyGameOptionsHit(const Window *window, Point local);
+std::optional<GameOptionsSettingState> CurrentGameOptionsValueEntry(const Window *window);
+bool PrepareCompanyPolicyView(Window *window);
+
 /** Width of setting buttons */
 #define SETTING_BUTTON_WIDTH  ((int)NWidgetScrollbar::GetHorizontalDimension().width * 2)
 /** Height of setting buttons */

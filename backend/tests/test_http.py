@@ -1,0 +1,432 @@
+"""Transport checks against a fake service; no running game is needed."""
+
+from __future__ import annotations
+
+import json
+import contextlib
+import io
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from unittest import mock
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+from backend import http
+from backend.__main__ import _renderer_config, main
+from backend.client import BackendClient, BackendError, MAX_IMAGE_BYTES, credential_from_env_or_file
+from backend.errors import ServiceError
+from backend.store import Store
+
+
+class StubService:
+    def __init__(self):
+        self.calls = []
+        self.event_calls = []
+        self.wait_calls = []
+        self.image_calls = []
+
+    def handle(self, method, path, token, body=None, query=None):
+        if token != "secret":
+            raise ServiceError("unauthorized", "Invalid credential", 401)
+        self.calls.append((method, path, body, query))
+        if path == "/v1/fail":
+            raise RuntimeError("SECRET INTERNAL FAILURE")
+        return 200, {"method": method, "path": path, "body": body, "query": query}
+
+    def events(self, token, after=None, limit=100):
+        if token != "secret":
+            raise ServiceError("unauthorized", "Invalid credential", 401)
+        self.event_calls.append(after)
+        if after is None:
+            return {"events": [{"id": "cursor-1", "type": "message", "data": {"body": "hello"}}], "cursor": "cursor-1"}
+        return {"events": [], "cursor": after}
+
+    def wait_for_events(self, token, after, timeout):
+        self.wait_calls.append((after, timeout))
+        time.sleep(min(timeout, 0.02))
+        return self.events(token, after=after)
+
+    def image(self, token, image_id):
+        if token != "secret":
+            raise ServiceError("not_found", "private artifact path and tick 100", 404)
+        self.image_calls.append(image_id)
+        return b"\x89PNG\r\n\x1a\n" + b"example"
+
+
+class HTTPTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.service = StubService()
+        cls.server = http.create_server(cls.service, port=0)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.origin = f"http://127.0.0.1:{cls.server.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=2)
+
+    def fetch(self, path, *, method="GET", body=None, headers=None):
+        req = Request(self.origin + path, data=body, method=method, headers=headers or {})
+        try:
+            with urlopen(req, timeout=3) as response:
+                return response.status, response.read().decode()
+        except HTTPError as exc:
+            return exc.code, exc.read().decode()
+
+    def test_auth_and_internal_error_redaction(self):
+        status, body = self.fetch("/v1/me")
+        self.assertEqual(status, 401)
+        self.assertEqual(json.loads(body)["error"]["code"], "unauthorized")
+        status, body = self.fetch("/v1/fail", headers={"Authorization": "Bearer secret"})
+        self.assertEqual(status, 500)
+        self.assertNotIn("SECRET INTERNAL FAILURE", body)
+
+    def test_json_validation_and_size(self):
+        headers = {"Authorization": "Bearer secret", "Content-Type": "application/json"}
+        for body in (b"[]", b'{"x":1,"x":2}', b'{"x":NaN}', b"{"):
+            with self.subTest(body=body):
+                status, _ = self.fetch("/v1/test", method="POST", body=body, headers=headers)
+                self.assertEqual(status, 400)
+        status, _ = self.fetch("/v1/test", method="POST", body=b"{" + b" " * 65536, headers=headers)
+        self.assertEqual(status, 413)
+        status, _ = self.fetch("/v1/test", method="POST", body=b"{}", headers={"Authorization": "Bearer secret"})
+        self.assertEqual(status, 415)
+
+    def test_query_and_json_events(self):
+        headers = {"Authorization": "Bearer secret"}
+        status, body = self.fetch("/v1/events?after=a", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["query"], {"after": "a"})
+        status, _ = self.fetch("/v1/me?x=1&x=2", headers=headers)
+        self.assertEqual(status, 400)
+
+    def test_sse_resume_and_reference_client(self):
+        previous = http.STREAM_LIFETIME
+        http.STREAM_LIFETIME = 0.05
+        try:
+            client = BackendClient(self.origin, "secret", timeout=2)
+            self.assertEqual(client.request("GET", "/v1/me")["path"], "/v1/me")
+            events = list(client.iter_events(reconnect=False))
+            self.assertEqual(events, [{"id": "cursor-1", "type": "message", "data": {"body": "hello"}}])
+            self.assertEqual(list(client.iter_events(after="cursor-1", reconnect=False)), [])
+            self.assertIn("cursor-1", self.service.event_calls)
+            self.assertTrue(self.service.wait_calls)
+            self.assertTrue(all(0 <= timeout <= http.HEARTBEAT_INTERVAL for _, timeout in self.service.wait_calls))
+            with self.assertRaises(BackendError) as exc:
+                BackendClient(self.origin, "bad").request("GET", "/v1/me")
+            self.assertEqual(exc.exception.status, 401)
+        finally:
+            http.STREAM_LIFETIME = previous
+
+    def test_capacity_above_fifty_connections(self):
+        self.assertGreaterEqual(http.MAX_STREAMS, 50)
+        self.assertGreaterEqual(http.MAX_HANDLERS, 50)
+        acquired = [self.server.stream_slots.acquire(blocking=False) for _ in range(50)]
+        try:
+            self.assertTrue(all(acquired))
+        finally:
+            for held in acquired:
+                if held:
+                    self.server.stream_slots.release()
+
+    def test_exact_public_static_files(self):
+        previous = http._WEB_ROOT
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("index.html", "viewer.js", "viewer.css", "events.mjs"):
+                (root / name).write_text(name, encoding="utf-8")
+            http._WEB_ROOT = root
+            try:
+                for path, name in (("/", "index.html"), ("/viewer.js", "viewer.js"),
+                                   ("/viewer.css", "viewer.css"), ("/events.mjs", "events.mjs")):
+                    with self.subTest(path=path):
+                        status, body = self.fetch(path)
+                        self.assertEqual((status, body), (200, name))
+                status, _ = self.fetch("/other.js")
+                self.assertEqual(status, 401)
+                if hasattr(os, "O_NOFOLLOW"):
+                    (root / "viewer.js").unlink()
+                    (root / "viewer.js").symlink_to(root / "index.html")
+                    status, _ = self.fetch("/viewer.js")
+                    self.assertEqual(status, 404)
+            finally:
+                http._WEB_ROOT = previous
+
+    def test_authenticated_binary_image(self):
+        req = Request(self.origin + "/v1/images/image_1", headers={"Authorization": "Bearer secret"})
+        with urlopen(req, timeout=3) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers["Content-Type"], "image/png")
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertTrue(response.read().startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertIn("image_1", self.service.image_calls)
+        status, body = self.fetch("/v1/images/image_1", headers={"Authorization": "Bearer bad"})
+        self.assertEqual(status, 404)
+        self.assertNotIn("private artifact path", body)
+        status, _ = self.fetch("/v1/images/image_1")
+        self.assertEqual(status, 401)
+        before = len(self.service.image_calls)
+        self.fetch("/v1/images/image_1/extra", headers={"Authorization": "Bearer secret"})
+        self.assertEqual(len(self.service.image_calls), before)
+
+    def test_credential_file_owner_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "token")
+            with open(path, "w", encoding="utf-8") as file:
+                file.write("secret\n")
+            os.chmod(path, 0o600)
+            self.assertEqual(credential_from_env_or_file(path), "secret")
+            os.chmod(path, 0o644)
+            with self.assertRaises(ValueError):
+                credential_from_env_or_file(path)
+            if hasattr(os, "O_NOFOLLOW"):
+                link = os.path.join(directory, "link")
+                os.symlink(path, link)
+                with self.assertRaises(OSError):
+                    credential_from_env_or_file(link)
+
+
+class RedirectTest(unittest.TestCase):
+    def test_client_never_forwards_bearer_to_redirect_host(self):
+        with self.assertRaises(ValueError):
+            BackendClient("file:///tmp/token", "secret")
+        seen = []
+
+        class Sink(BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        sink = ThreadingHTTPServer(("127.0.0.1", 0), Sink)
+        sink_thread = threading.Thread(target=sink.serve_forever, daemon=True)
+        sink_thread.start()
+
+        class Redirect(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{sink.server_address[1]}/capture")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        source = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+        source_thread = threading.Thread(target=source.serve_forever, daemon=True)
+        source_thread.start()
+        try:
+            client = BackendClient(f"http://127.0.0.1:{source.server_address[1]}", "secret")
+            with self.assertRaises(BackendError) as request_error:
+                client.request("GET", "/v1/me")
+            self.assertEqual(request_error.exception.status, 302)
+            with self.assertRaises(BackendError) as event_error:
+                list(client.iter_events(reconnect=False))
+            self.assertEqual(event_error.exception.status, 302)
+            with self.assertRaises(BackendError) as image_error:
+                client.image("d" * 32)
+            self.assertEqual(image_error.exception.status, 302)
+            self.assertEqual(seen, [])
+        finally:
+            source.shutdown()
+            sink.shutdown()
+            source.server_close()
+            sink.server_close()
+            source_thread.join(timeout=2)
+            sink_thread.join(timeout=2)
+
+
+class ReferenceImageClientTest(unittest.TestCase):
+    def test_authenticated_png_mime_size_and_id_validation(self):
+        seen = []
+
+        class Images(BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append((self.path, self.headers.get("Authorization"), self.headers.get("Accept")))
+                if self.headers.get("Authorization") != "Bearer secret":
+                    data = b'{"error":{"code":"unauthorized","message":"Invalid credential"}}'
+                    status, content_type = 401, "application/json"
+                elif self.path.endswith("/" + "b" * 32):
+                    data = b"\x89PNG\r\n\x1a\n" + b"x" * (MAX_IMAGE_BYTES + 1 - 8)
+                    status, content_type = 200, "image/png"
+                elif self.path.endswith("/" + "c" * 32):
+                    data = b"\x89PNG\r\n\x1a\nsmall"
+                    status, content_type = 200, "application/octet-stream"
+                elif self.path.endswith("/" + "d" * 32):
+                    data = b"not a PNG"
+                    status, content_type = 200, "image/png"
+                else:
+                    data = b"\x89PNG\r\n\x1a\nsmall"
+                    status, content_type = 200, "image/png"
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Images)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            origin = f"http://127.0.0.1:{server.server_address[1]}"
+            client = BackendClient(origin, "secret")
+            before = len(seen)
+            for invalid in ("../etc/passwd", "a" * 31, "g" * 32, None):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    client.image(invalid)
+            self.assertEqual(len(seen), before)
+            self.assertEqual(client.image("a" * 32), b"\x89PNG\r\n\x1a\nsmall")
+            self.assertEqual(seen[-1], ("/v1/images/" + "a" * 32, "Bearer secret", "image/png"))
+            with self.assertRaises(BackendError) as unauthorized:
+                BackendClient(origin, "wrong").image("a" * 32)
+            self.assertEqual((unauthorized.exception.status, unauthorized.exception.code), (401, "unauthorized"))
+            with self.assertRaises(BackendError) as oversized:
+                client.image("b" * 32)
+            self.assertEqual(oversized.exception.code, "image_too_large")
+            with self.assertRaises(BackendError) as wrong_type:
+                client.image("c" * 32)
+            self.assertEqual(wrong_type.exception.code, "invalid_image")
+            with self.assertRaises(BackendError) as wrong_signature:
+                client.image("d" * 32)
+            self.assertEqual(wrong_signature.exception.code, "invalid_image")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+
+class CLITest(unittest.TestCase):
+    def test_operator_budget_arguments_reject_invalid_values_before_opening_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "state.db")
+            base = ["serve", "--database", database, "--world", "world",
+                    "--engine-socket", os.path.join(directory, "engine.sock")]
+            invalid = [("--max-pending-company", value) for value in
+                       ("0", "01", "129", "+1", "1.0", "-1", "nan", "١")]
+            invalid += [("--max-pending-world", value) for value in
+                        ("0", "1025", "+1", "1e2")]
+            invalid += [("--capture-interval", value) for value in
+                        ("0.9", "61", "nan", "inf", "-inf", "oops", "2")]
+            for option, value in invalid:
+                with self.subTest(option=option, value=value):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit) as exit_status:
+                            main(base + [option, value])
+                    self.assertEqual(exit_status.exception.code, 2)
+                    self.assertFalse(os.path.exists(database))
+
+    def test_operator_limits_reach_store_and_both_renderer_modes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "state.db")
+            real_store = Store(database)
+            try:
+                token = real_store.provision("world", "viewer", 0, mode="visual")
+                run_id = real_store.authenticate(token).run_id
+            finally:
+                real_store.close()
+            artifacts = os.path.join(directory, "artifacts")
+            os.mkdir(artifacts, 0o700)
+            socket_path = os.path.join(directory, "renderer.sock")
+            config_path = os.path.join(directory, "renderers.json")
+            with open(config_path, "w", encoding="utf-8") as file:
+                json.dump({"version": 1, "world_id": "world", "runs": {
+                    run_id: {"socket": socket_path, "artifacts": artifacts},
+                }}, file)
+            os.chmod(config_path, 0o600)
+            base = ["serve", "--transport", "http", "--database", database,
+                    "--world", "world", "--engine-socket", os.path.join(directory, "engine.sock"),
+                    "--max-pending-company", "3", "--max-pending-world", "2",
+                    "--capture-interval", "2.5"]
+            actual_store = Store
+            store_arguments = []
+
+            def make_store(path, **kwargs):
+                store_arguments.append(kwargs)
+                return actual_store(path, **kwargs)
+
+            for renderer_arguments in (
+                ["--renderer-run", run_id, "--renderer-socket", socket_path,
+                 "--renderer-artifacts", artifacts],
+                ["--renderer-config", config_path],
+            ):
+                with self.subTest(renderer_arguments=renderer_arguments):
+                    with (mock.patch("backend.store.Store", side_effect=make_store),
+                          mock.patch("backend.renderer.RendererGateway") as gateway,
+                          mock.patch("backend.service.Service"),
+                          mock.patch("backend.http.create_server"),
+                          contextlib.redirect_stderr(io.StringIO())):
+                        self.assertEqual(main(base + renderer_arguments), 0)
+                    self.assertEqual(store_arguments[-1], {
+                        "max_pending_company": 3, "max_pending_world": 2,
+                    })
+                    self.assertEqual(gateway.call_args.kwargs["capture_interval"], 2.5)
+                    self.assertEqual(set(gateway.call_args.args[0]), {run_id})
+
+    def test_renderer_options_are_all_required(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "state.db")
+            base = [sys.executable, "-m", "backend", "serve", "--database", database,
+                    "--world", "world", "--engine-socket", os.path.join(directory, "engine.sock")]
+            result = subprocess.run(base + ["--renderer-run", "run"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("must be supplied together", result.stderr)
+            self.assertFalse(os.path.exists(database))
+
+    def test_four_renderer_operator_map_is_scoped_and_strict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(os.path.join(directory, "state.db"))
+            try:
+                runs = {}
+                for number in range(4):
+                    token = store.provision("world", f"viewer-{number}", 0, mode="visual")
+                    run_id = store.authenticate(token).run_id
+                    artifacts = os.path.join(directory, f"artifacts-{number}")
+                    os.mkdir(artifacts, 0o700)
+                    runs[run_id] = {"socket": os.path.join(directory, f"renderer-{number}.sock"),
+                                    "artifacts": artifacts}
+                path = os.path.join(directory, "renderers.json")
+
+                def write_config(data):
+                    with open(path, "w", encoding="utf-8") as file:
+                        json.dump(data, file)
+                    os.chmod(path, 0o600)
+
+                config = {"version": 1, "world_id": "world", "runs": runs}
+                write_config(config)
+                self.assertEqual(len(_renderer_config(path, store, "world")), 4)
+                wrong = dict(config, extra=True)
+                write_config(wrong)
+                with self.assertRaises(ValueError):
+                    _renderer_config(path, store, "world")
+                duplicate = json.loads(json.dumps(config))
+                values = list(duplicate["runs"].values())
+                values[1]["socket"] = values[0]["socket"]
+                write_config(duplicate)
+                with self.assertRaises(ValueError):
+                    _renderer_config(path, store, "world")
+                write_config(config)
+                os.chmod(path, 0o644)
+                with self.assertRaises(ValueError):
+                    _renderer_config(path, store, "world")
+            finally:
+                store.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

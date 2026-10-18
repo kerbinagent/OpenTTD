@@ -2999,6 +2999,74 @@ static bool IsVehicleRefittable(const Vehicle *v)
 	return false;
 }
 
+/** VehicleView's native status selector; reporting always uses the non-hover branch. */
+VehicleStatusInfo GetVehicleStatusInfo(const Vehicle *v, bool mouse_over_start_stop)
+{
+	VehicleStatusInfo result;
+	auto status = [&](VehicleStatusKind kind, std::string text) {
+		result.kind = kind;
+		result.text = std::move(text);
+		return result;
+	};
+
+	if (v->vehstatus.Test(VehState::Crashed)) return status(VehicleStatusKind::Crashed, GetString(STR_VEHICLE_STATUS_CRASHED));
+	if (v->type != VehicleType::Aircraft && v->breakdown_ctr == 1) return status(VehicleStatusKind::BrokenDown, GetString(STR_VEHICLE_STATUS_BROKEN_DOWN));
+
+	if (v->vehstatus.Test(VehState::Stopped) && (!mouse_over_start_stop || v->IsStoppedInDepot())) {
+		if (v->type != VehicleType::Train) return status(VehicleStatusKind::Stopped, GetString(STR_VEHICLE_STATUS_STOPPED));
+		if (v->cur_speed != 0) return status(VehicleStatusKind::Stopping, GetString(STR_VEHICLE_STATUS_TRAIN_STOPPING_VEL, PackVelocity(v->GetDisplaySpeed(), v->type)));
+		if (Train::From(v)->gcache.cached_power == 0) return status(VehicleStatusKind::NoPower, GetString(STR_VEHICLE_STATUS_TRAIN_NO_POWER));
+		return status(VehicleStatusKind::Stopped, GetString(STR_VEHICLE_STATUS_STOPPED));
+	}
+	if (v->IsInDepot() && v->IsWaitingForUnbunching()) return status(VehicleStatusKind::WaitingUnbunching, GetString(STR_VEHICLE_STATUS_WAITING_UNBUNCHING));
+	if (v->type == VehicleType::Train && Train::From(v)->flags.Test(VehicleRailFlag::Stuck) && !v->current_order.IsType(OT_LOADING)) return status(VehicleStatusKind::TrainStuck, GetString(STR_VEHICLE_STATUS_TRAIN_STUCK));
+	if (v->type == VehicleType::Aircraft && Aircraft::From(v)->flags.Test(VehicleAirFlag::DestinationTooFar) && !v->current_order.IsType(OT_LOADING)) return status(VehicleStatusKind::DestinationTooFar, GetString(STR_VEHICLE_STATUS_AIRCRAFT_TOO_FAR));
+
+	if (mouse_over_start_stop) {
+		if (v->vehstatus.Test(VehState::Stopped)) {
+			result.text_colour = ExtendedTextColour{TextColour::Red, ExtendedTextColourFlag::Forced};
+		} else if (v->type == VehicleType::Train && Train::From(v)->flags.Test(VehicleRailFlag::Stuck) && !v->current_order.IsType(OT_LOADING)) {
+			result.text_colour = ExtendedTextColour{TextColour::Orange, ExtendedTextColourFlag::Forced};
+		}
+	}
+
+	const bool lost = v->vehicle_flags.Test(VehicleFlag::PathfinderLost);
+	switch (v->current_order.GetType()) {
+		case OT_GOTO_STATION:
+			return status(lost ? VehicleStatusKind::CannotReachStation : VehicleStatusKind::HeadingToStation,
+				GetString(lost ? STR_VEHICLE_STATUS_CANNOT_REACH_STATION_VEL : STR_VEHICLE_STATUS_HEADING_FOR_STATION_VEL,
+					v->current_order.GetDestination(), PackVelocity(v->GetDisplaySpeed(), v->type)));
+		case OT_GOTO_DEPOT: {
+			/* Consecutive nearest-depot orders can lack any reachable destination.
+			 * Preserve the GUI's empty fallback rather than format depot zero. */
+			if (v->current_order.GetDestination() == DepotID::Invalid()) return result;
+			auto params = MakeParameters(v->type, v->current_order.GetDestination(), PackVelocity(v->GetDisplaySpeed(), v->type));
+			StringID string;
+			if (v->current_order.GetDepotActionType().Test(OrderDepotActionFlag::Halt)) {
+				string = lost ? STR_VEHICLE_STATUS_CANNOT_REACH_DEPOT_VEL : STR_VEHICLE_STATUS_HEADING_FOR_DEPOT_VEL;
+			} else if (v->current_order.GetDepotActionType().Test(OrderDepotActionFlag::Unbunch)) {
+				string = lost ? STR_VEHICLE_STATUS_CANNOT_REACH_DEPOT_SERVICE_VEL : STR_VEHICLE_STATUS_HEADING_FOR_DEPOT_UNBUNCH_VEL;
+			} else {
+				string = lost ? STR_VEHICLE_STATUS_CANNOT_REACH_DEPOT_SERVICE_VEL : STR_VEHICLE_STATUS_HEADING_FOR_DEPOT_SERVICE_VEL;
+			}
+			return status(lost ? VehicleStatusKind::CannotReachDepot : VehicleStatusKind::HeadingToDepot, GetStringWithArgs(string, params));
+		}
+		case OT_LOADING:
+			return status(VehicleStatusKind::LoadingUnloading, GetString(STR_VEHICLE_STATUS_LOADING_UNLOADING));
+		case OT_GOTO_WAYPOINT:
+			assert(v->type == VehicleType::Train || v->type == VehicleType::Road || v->type == VehicleType::Ship);
+			return status(lost ? VehicleStatusKind::CannotReachWaypoint : VehicleStatusKind::HeadingToWaypoint,
+				GetString(lost ? STR_VEHICLE_STATUS_CANNOT_REACH_WAYPOINT_VEL : STR_VEHICLE_STATUS_HEADING_FOR_WAYPOINT_VEL,
+					v->current_order.GetDestination(), PackVelocity(v->GetDisplaySpeed(), v->type)));
+		case OT_LEAVESTATION:
+			if (v->type != VehicleType::Aircraft) return status(VehicleStatusKind::Leaving, GetString(STR_VEHICLE_STATUS_LEAVING));
+			[[fallthrough]];
+		default:
+			if (v->GetNumManualOrders() == 0) return status(VehicleStatusKind::NoOrders, GetString(STR_VEHICLE_STATUS_NO_ORDERS_VEL, PackVelocity(v->GetDisplaySpeed(), v->type)));
+			return result;
+	}
+}
+
 /** Window manager class for viewing a vehicle. */
 struct VehicleViewWindow : Window {
 private:
@@ -3176,89 +3244,12 @@ public:
 		return GetString(STR_VEHICLE_VIEW_CAPTION, v->index);
 	}
 
-	/**
-	 * Get the status of the vehicle.
-	 * @param v The vehicle to check.
-	 * @param[out] text_colour The text colour.
-	 * @return The status as string.
-	 */
+	/** Get the same native selector used by ordinary vehicle reports. */
 	std::string GetVehicleStatusString(const Vehicle *v, ExtendedTextColour &text_colour) const
 	{
-		text_colour = TextColour::Black;
-
-		if (v->vehstatus.Test(VehState::Crashed)) return GetString(STR_VEHICLE_STATUS_CRASHED);
-
-		if (v->type != VehicleType::Aircraft && v->breakdown_ctr == 1) return GetString(STR_VEHICLE_STATUS_BROKEN_DOWN);
-
-		if (v->vehstatus.Test(VehState::Stopped) && (!mouse_over_start_stop || v->IsStoppedInDepot())) {
-			if (v->type != VehicleType::Train) return GetString(STR_VEHICLE_STATUS_STOPPED);
-			if (v->cur_speed != 0) return GetString(STR_VEHICLE_STATUS_TRAIN_STOPPING_VEL, PackVelocity(v->GetDisplaySpeed(), v->type));
-			if (Train::From(v)->gcache.cached_power == 0) return GetString(STR_VEHICLE_STATUS_TRAIN_NO_POWER);
-			return GetString(STR_VEHICLE_STATUS_STOPPED);
-		}
-
-		if (v->IsInDepot() && v->IsWaitingForUnbunching()) return GetString(STR_VEHICLE_STATUS_WAITING_UNBUNCHING);
-
-		if (v->type == VehicleType::Train && Train::From(v)->flags.Test(VehicleRailFlag::Stuck) && !v->current_order.IsType(OT_LOADING)) return GetString(STR_VEHICLE_STATUS_TRAIN_STUCK);
-
-		if (v->type == VehicleType::Aircraft && Aircraft::From(v)->flags.Test(VehicleAirFlag::DestinationTooFar) && !v->current_order.IsType(OT_LOADING)) return GetString(STR_VEHICLE_STATUS_AIRCRAFT_TOO_FAR);
-
-		/* Vehicle is in a "normal" state, show current order. */
-		if (mouse_over_start_stop) {
-			if (v->vehstatus.Test(VehState::Stopped)) {
-				text_colour = ExtendedTextColour{TextColour::Red, ExtendedTextColourFlag::Forced};
-			} else if (v->type == VehicleType::Train && Train::From(v)->flags.Test(VehicleRailFlag::Stuck) && !v->current_order.IsType(OT_LOADING)) {
-				text_colour = ExtendedTextColour{TextColour::Orange, ExtendedTextColourFlag::Forced};
-			}
-		}
-
-		switch (v->current_order.GetType()) {
-			case OT_GOTO_STATION:
-				return GetString(v->vehicle_flags.Test(VehicleFlag::PathfinderLost) ? STR_VEHICLE_STATUS_CANNOT_REACH_STATION_VEL : STR_VEHICLE_STATUS_HEADING_FOR_STATION_VEL,
-					v->current_order.GetDestination(), PackVelocity(v->GetDisplaySpeed(), v->type));
-
-			case OT_GOTO_DEPOT: {
-				/* This case *only* happens when multiple nearest depot orders
-				 * follow each other (including an order list only one order: a
-				 * nearest depot order) and there are no reachable depots.
-				 * It is primarily to guard for the case that there is no
-				 * depot with index 0, which would be used as fallback for
-				 * evaluating the string in the status bar. */
-				if (v->current_order.GetDestination() == DepotID::Invalid()) return {};
-
-				auto params = MakeParameters(v->type, v->current_order.GetDestination(), PackVelocity(v->GetDisplaySpeed(), v->type));
-				if (v->current_order.GetDepotActionType().Test(OrderDepotActionFlag::Halt)) {
-					return GetStringWithArgs(v->vehicle_flags.Test(VehicleFlag::PathfinderLost) ? STR_VEHICLE_STATUS_CANNOT_REACH_DEPOT_VEL : STR_VEHICLE_STATUS_HEADING_FOR_DEPOT_VEL, params);
-				}
-
-				if (v->current_order.GetDepotActionType().Test(OrderDepotActionFlag::Unbunch)) {
-					return GetStringWithArgs(v->vehicle_flags.Test(VehicleFlag::PathfinderLost) ? STR_VEHICLE_STATUS_CANNOT_REACH_DEPOT_SERVICE_VEL : STR_VEHICLE_STATUS_HEADING_FOR_DEPOT_UNBUNCH_VEL, params);
-				}
-
-				return GetStringWithArgs(v->vehicle_flags.Test(VehicleFlag::PathfinderLost) ? STR_VEHICLE_STATUS_CANNOT_REACH_DEPOT_SERVICE_VEL : STR_VEHICLE_STATUS_HEADING_FOR_DEPOT_SERVICE_VEL, params);
-			}
-
-			case OT_LOADING:
-				return GetString(STR_VEHICLE_STATUS_LOADING_UNLOADING);
-
-			case OT_GOTO_WAYPOINT:
-				assert(v->type == VehicleType::Train || v->type == VehicleType::Road || v->type == VehicleType::Ship);
-				return GetString(v->vehicle_flags.Test(VehicleFlag::PathfinderLost) ? STR_VEHICLE_STATUS_CANNOT_REACH_WAYPOINT_VEL : STR_VEHICLE_STATUS_HEADING_FOR_WAYPOINT_VEL,
-					v->current_order.GetDestination(),PackVelocity(v->GetDisplaySpeed(), v->type));
-
-			case OT_LEAVESTATION:
-				if (v->type != VehicleType::Aircraft) {
-					return GetString(STR_VEHICLE_STATUS_LEAVING);
-				}
-				[[fallthrough]];
-
-			default:
-				if (v->GetNumManualOrders() == 0) {
-					return GetString(STR_VEHICLE_STATUS_NO_ORDERS_VEL, PackVelocity(v->GetDisplaySpeed(), v->type));
-				}
-
-				return {};
-		}
+		auto status = GetVehicleStatusInfo(v, this->mouse_over_start_stop);
+		text_colour = status.text_colour;
+		return std::move(status.text);
 	}
 
 	void DrawWidget(const Rect &r, WidgetID widget) const override

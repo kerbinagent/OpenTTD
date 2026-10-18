@@ -33,6 +33,9 @@
 #include "../timer/timer_game_calendar.h"
 #include "../timer/timer_game_economy.h"
 #include "../timer/timer_game_realtime.h"
+#ifdef WITH_INTEGRATION
+#include "../integration/chat.h"
+#endif
 #include <mutex>
 #include <condition_variable>
 
@@ -1306,6 +1309,9 @@ NetworkRecvStatus ServerNetworkGameSocketHandler::ReceiveClientAck(Packet &p)
  */
 void NetworkServerSendChat(NetworkAction action, NetworkChatDestinationType desttype, int dest, std::string_view msg, ClientID from_id, int64_t data, bool from_admin)
 {
+#ifdef WITH_INTEGRATION
+	if (Integration::InterceptNativeChat(action, desttype, dest, msg, from_id, from_admin)) return;
+#endif
 	const NetworkClientInfo *ci, *ci_own, *ci_to;
 
 	switch (desttype) {

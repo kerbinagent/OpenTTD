@@ -26,6 +26,15 @@
 	requires std::is_base_of_v<PoolIDBase, Tindex> \
 	type Pool<Titem, Tindex, Tgrowth_step, Tpool_type, Tcache>
 
+/** Get a new process-local item generation without ever reusing an earlier value. */
+DEFINE_POOL_METHOD(uint64_t)::NextInstanceGeneration()
+{
+	if (this->last_instance_generation == std::numeric_limits<uint64_t>::max()) {
+		FatalError("{}: pool instance generation exhausted", this->name);
+	}
+	return ++this->last_instance_generation;
+}
+
 /**
  * Resizes the pool so 'index' can be addressed
  * @param index index we will allocate later
@@ -176,7 +185,7 @@ DEFINE_POOL_METHOD(void)::FreeItem(size_t size, size_t index)
 	}
 }
 
-/** Destroys all items in the pool and resets all member variables. */
+/** Destroys all items and resets allocation state, retaining the process-local generation counter. */
 DEFINE_POOL_METHOD(void)::CleanPool()
 {
 	this->cleaning = true;
@@ -208,6 +217,7 @@ DEFINE_POOL_METHOD(void)::CleanPool()
  * forcefully instantiated.
  */
 #define INSTANTIATE_POOL_METHODS(name) \
+	template uint64_t name ## Pool::NextInstanceGeneration(); \
 	template AllocationResult<name ## Pool::IndexType> name ## Pool::GetNew(size_t size); \
 	template AllocationResult<name ## Pool::IndexType> name ## Pool::GetNew(size_t size, size_t index); \
 	template void name ## Pool::FreeItem(size_t size, size_t index); \

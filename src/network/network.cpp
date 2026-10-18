@@ -8,8 +8,14 @@
 /** @file network.cpp Base functions for networking support. */
 
 #include "../stdafx.h"
+#ifdef WITH_INTEGRATION
+#include "../integration/renderer.h"
+#endif
 
 #include "../command_func.h"
+#ifdef WITH_INTEGRATION
+#include "../integration/visual_commands.h"
+#endif
 #include "../string_func.h"
 #include "../strings_func.h"
 #include "../timer/timer_game_tick.h"
@@ -1131,6 +1137,15 @@ void NetworkGameLoop()
 
 	if (!NetworkReceive()) return;
 
+#ifdef WITH_INTEGRATION
+	/* A rendering replica keeps receiving/sending without replaying beyond its screenshot. */
+	Integration::RendererTick();
+	if (!_network_server && Integration::RendererShouldPark()) {
+		NetworkSend();
+		return;
+	}
+#endif
+
 	if (_network_server) {
 		/* Log the sync state to check for in-syncedness of replays. */
 		if (TimerGameEconomy::date_fract == 0) {
@@ -1287,6 +1302,9 @@ void NetworkGameLoop()
 
 		/* Then we make the frame */
 		StateGameLoop();
+#ifdef WITH_INTEGRATION
+		Integration::CompletedFrame();
+#endif
 
 		_sync_seed_1 = _random.state[0];
 #ifdef NETWORK_SEND_DOUBLE_SEED

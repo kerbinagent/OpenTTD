@@ -8,6 +8,9 @@
 /** @file network_client.cpp Client part of the network protocol. */
 
 #include "../stdafx.h"
+#ifdef WITH_INTEGRATION
+#include "../integration/renderer.h"
+#endif
 #include "network_gui.h"
 #include "../saveload/saveload_func.h"
 #include "../saveload/saveload_filter.h"
@@ -117,6 +120,9 @@ ClientNetworkGameSocketHandler::~ClientNetworkGameSocketHandler()
 
 NetworkRecvStatus ClientNetworkGameSocketHandler::CloseConnection(NetworkRecvStatus status)
 {
+#ifdef WITH_INTEGRATION
+	Integration::RendererInvalidateSnapshot();
+#endif
 	assert(status != NetworkRecvStatus::Okay);
 	if (this->IsPendingDeletion()) return status;
 
@@ -795,6 +801,9 @@ NetworkRecvStatus ClientNetworkGameSocketHandler::ReceiveServerWaitForMap(Packet
 
 NetworkRecvStatus ClientNetworkGameSocketHandler::ReceiveServerMapBegin(Packet &p)
 {
+#ifdef WITH_INTEGRATION
+	Integration::RendererInvalidateSnapshot();
+#endif
 	if (this->status < ServerStatus::Authorized || this->status >= ServerStatus::Map) return NetworkRecvStatus::MalformedPacket;
 	Debug(Facility::Net, Severity::Trace3, "Client::status = MAP");
 	this->status = ServerStatus::Map;
@@ -974,6 +983,17 @@ NetworkRecvStatus ClientNetworkGameSocketHandler::ReceiveServerCommand(Packet &p
 		return NetworkRecvStatus::MalformedPacket;
 	}
 
+#ifdef WITH_INTEGRATION
+	if (Integration::RendererIsActive()) {
+		constexpr size_t MAX_REPLAY_BYTES = 2 * 1024 * 1024;
+		if (this->incoming_queue.size() >= 1024 || cp.data.size() > MAX_REPLAY_BYTES - std::min(this->renderer_queued_bytes, MAX_REPLAY_BYTES)) {
+			Integration::RendererInvalidateSnapshot();
+			return NetworkRecvStatus::ConnectionLost;
+		}
+		this->renderer_queued_bytes += cp.data.size();
+		if (this->incoming_queue.size() >= 512 || this->renderer_queued_bytes >= 1024 * 1024) Integration::RendererInvalidateSnapshot();
+	}
+#endif
 	this->incoming_queue.push_back(std::move(cp));
 
 	return NetworkRecvStatus::Okay;
@@ -1261,6 +1281,9 @@ void NetworkClientSendRcon(std::string_view password, std::string_view command)
  */
 void NetworkClientRequestMove(CompanyID company_id)
 {
+#ifdef WITH_INTEGRATION
+	if (Integration::RendererIsActive()) return;
+#endif
 	MyClient::SendMove(company_id);
 }
 

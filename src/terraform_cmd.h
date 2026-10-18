@@ -14,6 +14,23 @@
 #include "map_type.h"
 #include "slope_type.h"
 
+#include <map>
+#include <set>
+
+/** Pure native height model, before tile procedures, quotas or map writes. */
+struct TerraformGeometry {
+	std::set<TileIndex> dirty_tiles; ///< Tiles incident to the changed corner heights, including Void.
+	std::map<TileIndex, int> tile_to_new_height; ///< Proposed north-corner heights.
+};
+
+/**
+ * Collect one native TerraformLand operation without changing the world.
+ * The output is cleared first and is incomplete on failure. Costs returned here
+ * are the native fixed height-change cost; CmdTerraformLand retains all surface
+ * validation, additional costs, quotas and execution.
+ */
+std::tuple<CommandCost, TileIndex> CollectTerraformLandGeometry(TileIndex tile, Slope slope, bool dir_up, TerraformGeometry &geometry);
+
 std::tuple<CommandCost, Money, TileIndex> CmdTerraformLand(DoCommandFlags flags, TileIndex tile, Slope slope, bool dir_up);
 std::tuple<CommandCost, Money, TileIndex> CmdLevelLand(DoCommandFlags flags, TileIndex tile, TileIndex start_tile, bool diagonal, LevelMode lm);
 

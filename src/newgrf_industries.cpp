@@ -355,7 +355,12 @@ static uint32_t GetCountAndDistanceOfClosestInstance(const ResolverObject &objec
 		case 0x7A: return GetBadgeVariableResult(*this->ro.grffile, GetIndustrySpec(this->type)->badges, parameter);
 
 		/* Get a variable from the persistent storage */
-		case 0x7C: return (this->industry->psa != nullptr) ? this->industry->psa->GetValue(parameter) : 0;
+		case 0x7C:
+			if (this->presentation_psa != nullptr && parameter < IndustryPresentationPsaOverlay::CELL_COUNT) {
+				auto found = this->presentation_psa->industry_writes.find(this->industry);
+				if (found != this->presentation_psa->industry_writes.end() && found->second[parameter].has_value()) return *found->second[parameter];
+			}
+			return (this->industry->psa != nullptr) ? this->industry->psa->GetValue(parameter) : 0;
 
 		/* Industry structure access*/
 		case 0x80: return this->industry->location.tile.base();
@@ -439,7 +444,11 @@ static uint32_t GetCountAndDistanceOfClosestInstance(const ResolverObject &objec
 
 /* virtual */ void IndustriesScopeResolver::StorePSA(uint pos, int32_t value)
 {
-	if (this->industry->index == IndustryID::Invalid()) return;
+	if (this->industry == nullptr || this->industry->index == IndustryID::Invalid()) return;
+	if (this->presentation_psa != nullptr) {
+		if (pos < IndustryPresentationPsaOverlay::CELL_COUNT) this->presentation_psa->industry_writes[this->industry][pos] = value;
+		return; // Never create or mutate live PSA during observation.
+	}
 
 	if (this->industry->psa == nullptr) {
 		/* There is no need to create a storage if the value is zero. */
@@ -477,8 +486,14 @@ static const GRFFile *GetGrffile(IndustryType type)
  */
 IndustriesResolverObject::IndustriesResolverObject(TileIndex tile, Industry *indus, IndustryType type, uint32_t random_bits,
 		CallbackID callback, uint32_t callback_param1, uint32_t callback_param2)
+	: IndustriesResolverObject(tile, indus, type, random_bits, callback, callback_param1, callback_param2, nullptr)
+{
+}
+
+IndustriesResolverObject::IndustriesResolverObject(TileIndex tile, Industry *indus, IndustryType type, uint32_t random_bits,
+		CallbackID callback, uint32_t callback_param1, uint32_t callback_param2, IndustryPresentationPsaOverlay *presentation_psa)
 	: ResolverObject(GetGrffile(type), callback, callback_param1, callback_param2),
-	industries_scope(*this, tile, indus, type, random_bits)
+	industries_scope(*this, tile, indus, type, random_bits, presentation_psa), presentation_psa(presentation_psa)
 {
 	this->root_spritegroup = GetIndustrySpec(type)->grf_prop.GetSpriteGroup(indus != nullptr && indus->index != IndustryID::Invalid());
 }
@@ -499,7 +514,7 @@ TownScopeResolver *IndustriesResolverObject::GetTown()
 			t = ClosestTownFromTile(this->industries_scope.tile, UINT_MAX);
 		}
 		if (t == nullptr) return nullptr;
-		this->town_scope.emplace(*this, t, readonly);
+		this->town_scope.emplace(*this, t, readonly, this->presentation_psa);
 	}
 	return &*this->town_scope;
 }
@@ -528,6 +543,17 @@ uint32_t IndustriesResolverObject::GetDebugID() const
 uint16_t GetIndustryCallback(CallbackID callback, uint32_t param1, uint32_t param2, Industry *industry, IndustryType type, TileIndex tile, std::span<int32_t> regs100)
 {
 	IndustriesResolverObject object(tile, industry, type, 0, callback, param1, param2);
+	return object.ResolveCallback(regs100);
+}
+
+/** Observation-only callback entry; the caller owns one overlay for the whole view sequence. */
+uint16_t GetIndustryCallbackForObservation(CallbackID callback, uint32_t param1, uint32_t param2, Industry *industry,
+		IndustryType type, TileIndex tile, std::span<int32_t> regs100, IndustryPresentationPsaOverlay &presentation_psa)
+{
+	const GRFFile *grffile = GetGrffile(type);
+	if (industry == nullptr || grffile == nullptr || presentation_psa.industry != industry ||
+			presentation_psa.town != industry->town || presentation_psa.active_grfid != grffile->grfid) return CALLBACK_FAILED;
+	IndustriesResolverObject object(tile, industry, type, 0, callback, param1, param2, &presentation_psa);
 	return object.ResolveCallback(regs100);
 }
 

@@ -17,6 +17,9 @@
 #include "core/backup_type.hpp"
 #include "misc/endian_buffer.hpp"
 #include "tile_map.h"
+#ifdef WITH_INTEGRATION
+#include "integration/bridge_hooks.h"
+#endif
 
 /**
  * Define a default return value for a failed command.
@@ -325,6 +328,14 @@ protected:
 	template <typename Tcallback>
 	static bool InternalPost(StringID err_message, Tcallback *callback, bool my_cmd, bool network_command, TileIndex tile, std::tuple<Targs...> args)
 	{
+#ifdef WITH_INTEGRATION
+		/* Rendering replicas may replay authoritative commands, but never originate gameplay. */
+		if (!network_command && Integration::RendererIsActive()) {
+			return Integration::RendererCaptureNativeCommand(Tcmd, err_message,
+				reinterpret_cast<CommandCallback *>(reinterpret_cast<void(*)()>(callback)), _current_company,
+				EndianBufferWriter<CommandDataBuffer>::FromValue(args));
+		}
+#endif
 		/* Do not even think about executing out-of-bounds tile-commands. */
 		if (tile != 0 && (tile >= Map::Size() || (!IsValidTile(tile) && !GetCommandFlags<Tcmd>().Test(CommandFlag::AllTiles)))) return false;
 
@@ -336,6 +347,16 @@ protected:
 
 		Tret res = Execute(err_message, reinterpret_cast<CommandCallback *>(reinterpret_cast<void(*)()>(callback)), my_cmd, estimate_only, network_command, tile, args);
 		InternalPostResult(ExtractCommandCost(res), tile, estimate_only, only_sending, err_message, my_cmd);
+
+#ifdef WITH_INTEGRATION
+		if (network_command && !estimate_only && !only_sending) {
+			if constexpr (std::is_same_v<Tret, CommandCost>) {
+				Integration::CommandCompleted(Tcmd, ExtractCommandCost(res), {});
+			} else {
+				Integration::CommandCompleted(Tcmd, ExtractCommandCost(res), EndianBufferWriter<CommandDataBuffer>::FromValue(RemoveFirstTupleElement(res)));
+			}
+		}
+#endif
 
 		if (!estimate_only && !only_sending && callback != nullptr) {
 			if constexpr (std::is_same_v<Tcallback, CommandCallback>) {
@@ -427,6 +448,12 @@ protected:
 		if (exit_test) {
 			if (desync_log) LogCommandExecution(Tcmd, err_message, EndianBufferWriter<CommandDataBuffer>::FromValue(args), true);
 			cur_company.Restore();
+#ifdef WITH_INTEGRATION
+			/* Preserve this already-computed normal test failure before Post reduces it to a bool. */
+			if (!network_command && !estimate_only && ExtractCommandCost(res).Failed()) {
+				Integration::CommandPostTestFailed(Tcmd, ExtractCommandCost(res));
+			}
+#endif
 			return res;
 		}
 

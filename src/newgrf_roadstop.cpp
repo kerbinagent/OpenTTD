@@ -260,8 +260,10 @@ TownScopeResolver *RoadStopResolverObject::GetTown()
 		Town *t;
 		if (this->roadstop_scope.st != nullptr) {
 			t = this->roadstop_scope.st->town;
-		} else {
+		} else if (this->roadstop_scope.tile != INVALID_TILE) {
 			t = ClosestTownFromTile(this->roadstop_scope.tile, UINT_MAX);
+		} else {
+			return nullptr;
 		}
 		if (t == nullptr) return nullptr;
 		this->town_scope.emplace(*this, t, this->roadstop_scope.st == nullptr);

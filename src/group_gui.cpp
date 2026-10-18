@@ -29,6 +29,7 @@
 #include "group_gui.h"
 #include "vehicle_cmd.h"
 #include "gfx_func.h"
+#include "error.h"
 
 #include "widgets/group_widget.h"
 
@@ -211,6 +212,7 @@ private:
 	GroupID group_rename = GroupID::Invalid(); ///< Group being renamed, GroupID::Invalid() if none
 	GroupID group_over = GroupID::Invalid(); ///< Group over which a vehicle is dragged, GroupID::Invalid() if none
 	GroupID group_confirm = GroupID::Invalid(); ///< Group awaiting delete confirmation
+	uint64_t group_confirm_generation = 0; ///< Local allocation being confirmed; an ID can be reused while the dialog remains open.
 	GUIGroupList groups{}; ///< List of groups
 	uint tiny_step_height = 0; ///< Step height for the group list
 	Scrollbar *group_sb = nullptr;
@@ -723,6 +725,11 @@ public:
 	{
 		if (confirmed) {
 			VehicleGroupWindow *w = (VehicleGroupWindow*)win;
+			const Group *group = Group::GetIfValid(w->group_confirm);
+			if (group == nullptr || group->GetInstanceGeneration() != w->group_confirm_generation) {
+				ShowErrorMessage(GetEncodedString(STR_ERROR_GROUP_CAN_T_DELETE), {}, WarningLevel::Info);
+				return;
+			}
 			w->vli.SetIndex(ALL_GROUP);
 			Command<Commands::DeleteGroup>::Post(STR_ERROR_GROUP_CAN_T_DELETE, w->group_confirm);
 		}
@@ -875,6 +882,9 @@ public:
 
 			case WID_GL_DELETE_GROUP: { // Delete the selected group
 				this->group_confirm = this->vli.ToGroupID();
+				const Group *group = Group::GetIfValid(this->group_confirm);
+				if (group == nullptr) return;
+				this->group_confirm_generation = group->GetInstanceGeneration();
 				ShowQuery(
 					GetEncodedString(STR_QUERY_GROUP_DELETE_CAPTION),
 					GetEncodedString(STR_GROUP_DELETE_QUERY_TEXT),

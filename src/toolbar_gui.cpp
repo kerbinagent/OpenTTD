@@ -75,6 +75,10 @@
 
 #include "dropdown_common_type.h"
 
+#ifdef WITH_INTEGRATION
+#include "integration/bridge_hooks.h"
+#endif
+
 #include "safeguards.h"
 
 
@@ -100,6 +104,19 @@ enum class CallBackFunction : uint8_t {
 };
 
 static CallBackFunction _last_started_action = CallBackFunction::None; ///< Last started user action.
+
+#ifdef WITH_INTEGRATION
+static bool RendererToolbarMenuResultAllowed(WidgetID widget, int result);
+#endif
+
+/** Apply renderer restrictions while the native item is still mutable. */
+static void AppendToolbarMenuItem(DropDownList &list, [[maybe_unused]] WidgetID widget, std::unique_ptr<DropDownListItem> item)
+{
+#ifdef WITH_INTEGRATION
+	if (Integration::RendererIsActive() && !RendererToolbarMenuResultAllowed(widget, item->result)) item->masked = true;
+#endif
+	list.push_back(std::move(item));
+}
 
 /**
  * Company name list item, with company-colour icon, name, and lock components.
@@ -146,9 +163,9 @@ static void PopupMainToolbarMenu(Window *w, WidgetID widget, const std::initiali
 	int i = 0;
 	for (StringID string : strings) {
 		if (string == STR_NULL) {
-			list.push_back(MakeDropDownListDividerItem());
+			AppendToolbarMenuItem(list, widget, MakeDropDownListDividerItem());
 		} else {
-			list.push_back(MakeDropDownListStringItem(string, i));
+			AppendToolbarMenuItem(list, widget, MakeDropDownListStringItem(string, i));
 			i++;
 		}
 	}
@@ -266,6 +283,19 @@ enum class OptionMenuEntries : uint8_t {
 	TransparentStationSigns, ///< Toggle transparency of signs and names.
 };
 
+#ifdef WITH_INTEGRATION
+/** Exact native results admitted from the three newly reachable menus. */
+static bool RendererToolbarMenuResultAllowed(WidgetID widget, int result)
+{
+	switch (widget) {
+		case WID_TN_SETTINGS: return result == to_underlying(OptionMenuEntries::GameOptions);
+		case WID_TN_HELP: return result == 0; // Land information.
+		case WID_TN_MESSAGES: return result == 0 || result == 1; // Last news/history.
+		default: return true;
+	}
+}
+#endif
+
 /**
  * Handle click on Options button in toolbar.
  *
@@ -275,35 +305,36 @@ enum class OptionMenuEntries : uint8_t {
 static CallBackFunction ToolbarOptionsClick(Window *w)
 {
 	DropDownList list;
-	list.push_back(MakeDropDownListStringItem(STR_SETTINGS_MENU_GAME_OPTIONS, OptionMenuEntries::GameOptions));
+	auto append = [&](std::unique_ptr<DropDownListItem> item) { AppendToolbarMenuItem(list, WID_TN_SETTINGS, std::move(item)); };
+	append(MakeDropDownListStringItem(STR_SETTINGS_MENU_GAME_OPTIONS, OptionMenuEntries::GameOptions));
 	/* Changes to the per-AI settings don't get send from the server to the clients. Clients get
 	 * the settings once they join but never update it. As such don't show the window at all
 	 * to network clients. */
 	if (!_networking || _network_server) {
-		list.push_back(MakeDropDownListStringItem(STR_SETTINGS_MENU_AI_SETTINGS, OptionMenuEntries::AISettings));
-		list.push_back(MakeDropDownListStringItem(STR_SETTINGS_MENU_GAMESCRIPT_SETTINGS, OptionMenuEntries::GameScriptSettings));
+		append(MakeDropDownListStringItem(STR_SETTINGS_MENU_AI_SETTINGS, OptionMenuEntries::AISettings));
+		append(MakeDropDownListStringItem(STR_SETTINGS_MENU_GAMESCRIPT_SETTINGS, OptionMenuEntries::GameScriptSettings));
 	}
-	list.push_back(MakeDropDownListStringItem(STR_SETTINGS_MENU_NEWGRF_SETTINGS, OptionMenuEntries::NewGRFSettings));
+	append(MakeDropDownListStringItem(STR_SETTINGS_MENU_NEWGRF_SETTINGS, OptionMenuEntries::NewGRFSettings));
 	if (_game_mode != GameMode::Editor && !_networking) {
-		list.push_back(MakeDropDownListStringItem(STR_SETTINGS_MENU_SANDBOX_OPTIONS, OptionMenuEntries::SandboxOptions));
+		append(MakeDropDownListStringItem(STR_SETTINGS_MENU_SANDBOX_OPTIONS, OptionMenuEntries::SandboxOptions));
 	}
-	list.push_back(MakeDropDownListStringItem(STR_SETTINGS_MENU_TRANSPARENCY_OPTIONS, OptionMenuEntries::Transparencies));
-	list.push_back(MakeDropDownListDividerItem());
-	list.push_back(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::ShowTownNames), STR_SETTINGS_MENU_TOWN_NAMES_DISPLAYED, OptionMenuEntries::ShowTownNames));
-	list.push_back(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::ShowStationNames), STR_SETTINGS_MENU_STATION_NAMES_DISPLAYED, OptionMenuEntries::ShowStationNames));
-	list.push_back(MakeDropDownListCheckedItem(_facility_display_opt.Test(StationFacility::Train), STR_SETTINGS_MENU_STATION_NAMES_TRAIN, OptionMenuEntries::ShowTrainStationNames, false, false, 1));
-	list.push_back(MakeDropDownListCheckedItem(_facility_display_opt.Test(StationFacility::TruckStop), STR_SETTINGS_MENU_STATION_NAMES_LORRY, OptionMenuEntries::ShowLorryStationNames, false, false, 1));
-	list.push_back(MakeDropDownListCheckedItem(_facility_display_opt.Test(StationFacility::BusStop), STR_SETTINGS_MENU_STATION_NAMES_BUS, OptionMenuEntries::ShowBusStationNames, false, false, 1));
-	list.push_back(MakeDropDownListCheckedItem(_facility_display_opt.Test(StationFacility::Dock), STR_SETTINGS_MENU_STATION_NAMES_SHIP, OptionMenuEntries::ShowDockNames, false, false, 1));
-	list.push_back(MakeDropDownListCheckedItem(_facility_display_opt.Test(StationFacility::Airport), STR_SETTINGS_MENU_STATION_NAMES_PLANE, OptionMenuEntries::ShowAirportNames, false, false, 1));
-	list.push_back(MakeDropDownListCheckedItem(_facility_display_opt.Test(STATION_FACILITY_GHOST), STR_SETTINGS_MENU_STATION_NAMES_GHOST, OptionMenuEntries::ShowGhostStationNames, false, false, 1));
-	list.push_back(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::ShowWaypointNames), STR_SETTINGS_MENU_WAYPOINTS_DISPLAYED, OptionMenuEntries::ShowWaypointNames));
-	list.push_back(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::ShowSigns), STR_SETTINGS_MENU_SIGNS_DISPLAYED, OptionMenuEntries::ShowSigns));
-	list.push_back(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::ShowCompetitorSigns), STR_SETTINGS_MENU_SHOW_COMPETITOR_SIGNS, OptionMenuEntries::ShowCompetitorSigns));
-	list.push_back(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::FullAnimation), STR_SETTINGS_MENU_FULL_ANIMATION, OptionMenuEntries::FullAnimation));
-	list.push_back(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::FullDetail), STR_SETTINGS_MENU_FULL_DETAIL, OptionMenuEntries::FullDetails));
-	list.push_back(MakeDropDownListCheckedItem(IsTransparencySet(TransparencyOption::Houses), STR_SETTINGS_MENU_TRANSPARENT_BUILDINGS, OptionMenuEntries::TransparentBuildings));
-	list.push_back(MakeDropDownListCheckedItem(IsTransparencySet(TransparencyOption::Signs), STR_SETTINGS_MENU_TRANSPARENT_SIGNS, OptionMenuEntries::TransparentStationSigns));
+	append(MakeDropDownListStringItem(STR_SETTINGS_MENU_TRANSPARENCY_OPTIONS, OptionMenuEntries::Transparencies));
+	append(MakeDropDownListDividerItem());
+	append(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::ShowTownNames), STR_SETTINGS_MENU_TOWN_NAMES_DISPLAYED, OptionMenuEntries::ShowTownNames));
+	append(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::ShowStationNames), STR_SETTINGS_MENU_STATION_NAMES_DISPLAYED, OptionMenuEntries::ShowStationNames));
+	append(MakeDropDownListCheckedItem(_facility_display_opt.Test(StationFacility::Train), STR_SETTINGS_MENU_STATION_NAMES_TRAIN, OptionMenuEntries::ShowTrainStationNames, false, false, 1));
+	append(MakeDropDownListCheckedItem(_facility_display_opt.Test(StationFacility::TruckStop), STR_SETTINGS_MENU_STATION_NAMES_LORRY, OptionMenuEntries::ShowLorryStationNames, false, false, 1));
+	append(MakeDropDownListCheckedItem(_facility_display_opt.Test(StationFacility::BusStop), STR_SETTINGS_MENU_STATION_NAMES_BUS, OptionMenuEntries::ShowBusStationNames, false, false, 1));
+	append(MakeDropDownListCheckedItem(_facility_display_opt.Test(StationFacility::Dock), STR_SETTINGS_MENU_STATION_NAMES_SHIP, OptionMenuEntries::ShowDockNames, false, false, 1));
+	append(MakeDropDownListCheckedItem(_facility_display_opt.Test(StationFacility::Airport), STR_SETTINGS_MENU_STATION_NAMES_PLANE, OptionMenuEntries::ShowAirportNames, false, false, 1));
+	append(MakeDropDownListCheckedItem(_facility_display_opt.Test(STATION_FACILITY_GHOST), STR_SETTINGS_MENU_STATION_NAMES_GHOST, OptionMenuEntries::ShowGhostStationNames, false, false, 1));
+	append(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::ShowWaypointNames), STR_SETTINGS_MENU_WAYPOINTS_DISPLAYED, OptionMenuEntries::ShowWaypointNames));
+	append(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::ShowSigns), STR_SETTINGS_MENU_SIGNS_DISPLAYED, OptionMenuEntries::ShowSigns));
+	append(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::ShowCompetitorSigns), STR_SETTINGS_MENU_SHOW_COMPETITOR_SIGNS, OptionMenuEntries::ShowCompetitorSigns));
+	append(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::FullAnimation), STR_SETTINGS_MENU_FULL_ANIMATION, OptionMenuEntries::FullAnimation));
+	append(MakeDropDownListCheckedItem(_display_opt.Test(DisplayOption::FullDetail), STR_SETTINGS_MENU_FULL_DETAIL, OptionMenuEntries::FullDetails));
+	append(MakeDropDownListCheckedItem(IsTransparencySet(TransparencyOption::Houses), STR_SETTINGS_MENU_TRANSPARENT_BUILDINGS, OptionMenuEntries::TransparentBuildings));
+	append(MakeDropDownListCheckedItem(IsTransparencySet(TransparencyOption::Signs), STR_SETTINGS_MENU_TRANSPARENT_SIGNS, OptionMenuEntries::TransparentStationSigns));
 
 	ShowDropDownList(w, std::move(list), 0, WID_TN_SETTINGS, 140, GetToolbarDropDownOptions());
 	return CallBackFunction::None;
@@ -2043,6 +2074,9 @@ struct MainToolbarWindow : Window {
 
 	void OnDropdownSelect(WidgetID widget, int index, int) override
 	{
+#ifdef WITH_INTEGRATION
+		if (Integration::RendererIsActive() && !RendererToolbarMenuResultAllowed(widget, index)) return;
+#endif
 		CallBackFunction cbf = _menu_clicked_procs[widget](index);
 		if (cbf != CallBackFunction::None) _last_started_action = cbf;
 	}

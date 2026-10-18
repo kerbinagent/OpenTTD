@@ -885,7 +885,12 @@ CommandCost CmdBuildRailVehicle(DoCommandFlags flags, TileIndex tile, const Engi
 	return CommandCost();
 }
 
-static Train *FindGoodVehiclePos(const Train *src)
+/**
+ * Select the ordinary implicit destination for a wagon moved within a depot.
+ * Keep this pure selector shared with source-frame target validation. Callers
+ * retain the engine and autoreplace bypass; self-selection is intentional.
+ */
+VehicleID FindRailVehicleMoveDestination(const Train *src)
 {
 	EngineID eng = src->engine_type;
 
@@ -896,11 +901,11 @@ static Train *FindGoodVehiclePos(const Train *src)
 		Train *t = dst;
 		while (t->engine_type == eng) {
 			t = t->Next();
-			if (t == nullptr) return dst;
+			if (t == nullptr) return dst->index;
 		}
 	}
 
-	return nullptr;
+	return VehicleID::Invalid();
 }
 
 /** Helper type for lists/vectors of trains */
@@ -1280,7 +1285,7 @@ CommandCost CmdMoveRailVehicle(DoCommandFlags flags, VehicleID src_veh, VehicleI
 	/* if nothing is selected as destination, try and find a matching vehicle to drag to. */
 	Train *dst;
 	if (dest_veh == VehicleID::Invalid()) {
-		dst = (src->IsEngine() || flags.Test(DoCommandFlag::AutoReplace)) ? nullptr : FindGoodVehiclePos(src);
+		dst = (src->IsEngine() || flags.Test(DoCommandFlag::AutoReplace)) ? nullptr : Train::GetIfValid(FindRailVehicleMoveDestination(src));
 	} else {
 		dst = Train::GetIfValid(dest_veh);
 		if (dst == nullptr) return CMD_ERROR;

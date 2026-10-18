@@ -27,16 +27,10 @@
 
 #include "safeguards.h"
 
-/** Set of tiles. */
-typedef std::set<TileIndex> TileIndexSet;
 /** Mapping of tiles to their height. */
 typedef std::map<TileIndex, int> TileIndexToHeightMap;
 
-/** State of the terraforming. */
-struct TerraformerState {
-	TileIndexSet dirty_tiles;                ///< The tiles that need to be redrawn.
-	TileIndexToHeightMap tile_to_new_height; ///< The tiles for which the height has changed.
-};
+using TerraformerState = TerraformGeometry;
 
 /**
  * Gets the TileHeight (height of north corner) of a tile as of current terraforming progress.
@@ -161,6 +155,45 @@ static std::tuple<CommandCost, TileIndex> TerraformTileHeight(TerraformerState *
 	return { total_cost, INVALID_TILE };
 }
 
+std::tuple<CommandCost, TileIndex> CollectTerraformLandGeometry(TileIndex tile, Slope slope, bool dir_up, TerraformGeometry &ts)
+{
+	ts.dirty_tiles.clear();
+	ts.tile_to_new_height.clear();
+	if (tile >= Map::Size()) return { CMD_ERROR, INVALID_TILE };
+	CommandCost total_cost(ExpensesType::Construction);
+	int direction = (dir_up ? 1 : -1);
+
+	/* Compute the costs and the terraforming result in a model of the landscape */
+	if ((slope & SLOPE_W) != 0 && tile + TileDiffXY(1, 0) < Map::Size()) {
+		TileIndex t = tile + TileDiffXY(1, 0);
+		auto [cost, err_tile] = TerraformTileHeight(&ts, t, TileHeight(t) + direction);
+		if (cost.Failed()) return { cost, err_tile };
+		total_cost.AddCost(cost.GetCost());
+	}
+
+	if ((slope & SLOPE_S) != 0 && tile + TileDiffXY(1, 1) < Map::Size()) {
+		TileIndex t = tile + TileDiffXY(1, 1);
+		auto [cost, err_tile] = TerraformTileHeight(&ts, t, TileHeight(t) + direction);
+		if (cost.Failed()) return { cost, err_tile };
+		total_cost.AddCost(cost.GetCost());
+	}
+
+	if ((slope & SLOPE_E) != 0 && tile + TileDiffXY(0, 1) < Map::Size()) {
+		TileIndex t = tile + TileDiffXY(0, 1);
+		auto [cost, err_tile] = TerraformTileHeight(&ts, t, TileHeight(t) + direction);
+		if (cost.Failed()) return { cost, err_tile };
+		total_cost.AddCost(cost.GetCost());
+	}
+
+	if ((slope & SLOPE_N) != 0) {
+		TileIndex t = tile + TileDiffXY(0, 0);
+		auto [cost, err_tile] = TerraformTileHeight(&ts, t, TileHeight(t) + direction);
+		if (cost.Failed()) return { cost, err_tile };
+		total_cost.AddCost(cost.GetCost());
+	}
+	return { total_cost, INVALID_TILE };
+}
+
 /**
  * Terraform land
  * @param flags for this command type
@@ -171,38 +204,10 @@ static std::tuple<CommandCost, TileIndex> TerraformTileHeight(TerraformerState *
  */
 std::tuple<CommandCost, Money, TileIndex> CmdTerraformLand(DoCommandFlags flags, TileIndex tile, Slope slope, bool dir_up)
 {
-	CommandCost total_cost(ExpensesType::Construction);
-	int direction = (dir_up ? 1 : -1);
 	TerraformerState ts;
-
-	/* Compute the costs and the terraforming result in a model of the landscape */
-	if ((slope & SLOPE_W) != 0 && tile + TileDiffXY(1, 0) < Map::Size()) {
-		TileIndex t = tile + TileDiffXY(1, 0);
-		auto [cost, err_tile] = TerraformTileHeight(&ts, t, TileHeight(t) + direction);
-		if (cost.Failed()) return { cost, 0, err_tile };
-		total_cost.AddCost(cost.GetCost());
-	}
-
-	if ((slope & SLOPE_S) != 0 && tile + TileDiffXY(1, 1) < Map::Size()) {
-		TileIndex t = tile + TileDiffXY(1, 1);
-		auto [cost, err_tile] = TerraformTileHeight(&ts, t, TileHeight(t) + direction);
-		if (cost.Failed()) return { cost, 0, err_tile };
-		total_cost.AddCost(cost.GetCost());
-	}
-
-	if ((slope & SLOPE_E) != 0 && tile + TileDiffXY(0, 1) < Map::Size()) {
-		TileIndex t = tile + TileDiffXY(0, 1);
-		auto [cost, err_tile] = TerraformTileHeight(&ts, t, TileHeight(t) + direction);
-		if (cost.Failed()) return { cost, 0, err_tile };
-		total_cost.AddCost(cost.GetCost());
-	}
-
-	if ((slope & SLOPE_N) != 0) {
-		TileIndex t = tile + TileDiffXY(0, 0);
-		auto [cost, err_tile] = TerraformTileHeight(&ts, t, TileHeight(t) + direction);
-		if (cost.Failed()) return { cost, 0, err_tile };
-		total_cost.AddCost(cost.GetCost());
-	}
+	auto [total_cost, geometry_error] = CollectTerraformLandGeometry(tile, slope, dir_up, ts);
+	if (total_cost.Failed()) return { total_cost, 0, geometry_error };
+	int direction = (dir_up ? 1 : -1);
 
 	/* Check if the terraforming is valid wrt. tunnels, bridges and objects on the surface
 	 * Pass == 0: Collect tileareas which are caused to be auto-cleared.

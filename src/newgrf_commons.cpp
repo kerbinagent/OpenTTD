@@ -551,15 +551,16 @@ bool ConvertBooleanCallback(const GRFFile *grffile, uint16_t cbid, uint16_t cb_r
  * @param grffile NewGRF returning the value.
  * @param cbid Callback returning the value.
  * @param cb_res Callback result.
+ * @param report_invalid Report malformed v8 results through native diagnostics.
  * @return Boolean value. True if cb_res != 0.
  */
-bool Convert8bitBooleanCallback(const GRFFile *grffile, uint16_t cbid, uint16_t cb_res)
+bool Convert8bitBooleanCallback(const GRFFile *grffile, uint16_t cbid, uint16_t cb_res, bool report_invalid)
 {
 	assert(cb_res != CALLBACK_FAILED); // We do not know what to return
 
 	if (grffile->grf_version < 8) return GB(cb_res, 0, 8) != 0;
 
-	if (cb_res > 1) ErrorUnknownCallbackResult(grffile->grfid, cbid, cb_res);
+	if (report_invalid && cb_res > 1) ErrorUnknownCallbackResult(grffile->grfid, cbid, cb_res);
 	return cb_res != 0;
 }
 

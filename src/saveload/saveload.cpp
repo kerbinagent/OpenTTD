@@ -21,6 +21,9 @@
  */
 
 #include "../stdafx.h"
+#ifdef WITH_INTEGRATION
+#include "../integration/bridge_hooks.h"
+#endif
 #include "../debug.h"
 #include "../station_base.h"
 #include "../thread.h"
@@ -378,6 +381,14 @@ static void SlNullPointers()
 typedef void (*AsyncSaveFinishProc)();                      ///< Callback for when the savegame loading is finished.
 static std::atomic<AsyncSaveFinishProc> _async_save_finish; ///< Callback to call when the savegame loading is finished.
 static std::thread _save_thread;                            ///< The thread we're using to compress and write a savegame
+#ifdef WITH_INTEGRATION
+static std::atomic<bool> _integration_save_succeeded{true};
+#endif
+
+bool IsSaveInProgress()
+{
+	return _sl.saveinprogress;
+}
 
 /**
  * Called by save thread to tell we finished saving.
@@ -2990,6 +3001,9 @@ static inline void ClearSaveLoadState()
 /** Update the gui accordingly when starting saving and set locks on saveload. */
 static void SaveFileStart()
 {
+#ifdef WITH_INTEGRATION
+	_integration_save_succeeded = true;
+#endif
 	SetMouseCursorBusy(true);
 
 	InvalidateWindowData(WindowClass::Statusbar, 0, SBI_SAVELOAD_START);
@@ -3003,6 +3017,9 @@ static void SaveFileDone()
 
 	InvalidateWindowData(WindowClass::Statusbar, 0, SBI_SAVELOAD_FINISH);
 	_sl.saveinprogress = false;
+#ifdef WITH_INTEGRATION
+	Integration::SaveFinished(_integration_save_succeeded.load());
+#endif
 
 #ifdef __EMSCRIPTEN__
 	EM_ASM(if (window["openttd_syncfs"]) openttd_syncfs());
@@ -3039,6 +3056,9 @@ EncodedString GetSaveLoadErrorMessage()
 /** Show a gui message when saving has failed */
 static void SaveFileError()
 {
+#ifdef WITH_INTEGRATION
+	_integration_save_succeeded = false;
+#endif
 	ShowErrorMessage(GetSaveLoadErrorType(), GetSaveLoadErrorMessage(), WarningLevel::Error);
 	SaveFileDone();
 }
@@ -3072,6 +3092,9 @@ static SaveLoadResult SaveFileToDisk(bool threaded)
 		ClearSaveLoadState();
 
 		AsyncSaveFinishProc asfp = SaveFileDone;
+#ifdef WITH_INTEGRATION
+		_integration_save_succeeded = false;
+#endif
 
 		/* We don't want to shout when saving is just
 		 * cancelled due to a client disconnecting. */
@@ -3355,6 +3378,9 @@ SaveLoadResult SaveOrLoad(std::string_view filename, SaveLoadOperation fop, Deta
 				return SaveLoadResult::ReInit;
 			}
 			_gamelog.StopAction();
+			#ifdef WITH_INTEGRATION
+			Integration::WorldLoaded(filename);
+			#endif
 			return SaveLoadResult::Ok;
 		}
 
@@ -3396,7 +3422,11 @@ SaveLoadResult SaveOrLoad(std::string_view filename, SaveLoadOperation fop, Deta
 		/* LOAD game */
 		assert(fop == SaveLoadOperation::Load || fop == SaveLoadOperation::Check);
 		Debug(Facility::Desync, Severity::Error, "load: {}", filename);
-		return DoLoad(std::make_shared<FileReader>(std::move(*fh)), fop == SaveLoadOperation::Check);
+		SaveLoadResult result = DoLoad(std::make_shared<FileReader>(std::move(*fh)), fop == SaveLoadOperation::Check);
+#ifdef WITH_INTEGRATION
+		if (fop == SaveLoadOperation::Load && result == SaveLoadResult::Ok) Integration::WorldLoaded(filename);
+#endif
+		return result;
 	} catch (...) {
 		/* This code may be executed both for old and new save games. */
 		ClearSaveLoadState();

@@ -389,6 +389,8 @@ static void ResetAllSettingsConfirmationCallback(Window *w, bool confirmed)
 }
 
 struct GameOptionsWindow : Window {
+	friend GameOptionsHit ClassifyGameOptionsHit(const Window *window, Point local);
+
 	static inline GameSettings *settings_ptr; ///< Pointer to the game settings being displayed and modified.
 
 	SettingEntry *valuewindow_entry = nullptr; ///< If non-nullptr, pointer to setting for which a value-entering window has been opened.
@@ -1221,20 +1223,36 @@ struct GameOptionsWindow : Window {
 		}
 	}
 
-	void OptionsPanelClick(Point pt)
+private:
+	struct OptionsPanelHit {
+		BaseSettingEntry *entry = nullptr;
+		int x = 0;
+	};
+
+	/** Resolve the same visible row and scaled/RTL indentation used by a native click. */
+	OptionsPanelHit ResolveOptionsPanelHit(Point pt) const
 	{
 		int32_t btn = this->vscroll->GetScrolledRowFromWidget(pt.y, this, WID_GO_OPTIONSPANEL, WidgetDimensions::scaled.framerect.top);
-		if (btn == INT32_MAX || btn < this->warn_lines) return;
+		if (btn == INT32_MAX || btn < this->warn_lines) return {};
 		btn -= this->warn_lines;
 
 		uint cur_row = 0;
 		BaseSettingEntry *clicked_entry = GetSettingsTree().FindEntry(btn, &cur_row);
-
-		if (clicked_entry == nullptr) return;  // Clicked below the last setting of the page
+		if (clicked_entry == nullptr) return {}; // Clicked below the last setting of the page.
 
 		const NWidgetBase *wid = this->GetWidget<NWidgetBase>(WID_GO_OPTIONSPANEL);
 		int x = (_current_text_dir == TD_RTL ? this->width - 1 - pt.x : pt.x) - WidgetDimensions::scaled.frametext.left - (clicked_entry->level + 1) * WidgetDimensions::scaled.hsep_indent - wid->pos_x; // Shift x coordinate
-		if (x < 0) return;  // Clicked left of the entry
+		return {clicked_entry, x};
+	}
+
+public:
+	void OptionsPanelClick(Point pt)
+	{
+		OptionsPanelHit hit = this->ResolveOptionsPanelHit(pt);
+		BaseSettingEntry *clicked_entry = hit.entry;
+		if (clicked_entry == nullptr || hit.x < 0) return;
+		int x = hit.x;
+		const NWidgetBase *wid = this->GetWidget<NWidgetBase>(WID_GO_OPTIONSPANEL);
 
 		SettingsPage *clicked_page = dynamic_cast<SettingsPage*>(clicked_entry);
 		if (clicked_page != nullptr) {
@@ -1609,6 +1627,74 @@ struct GameOptionsWindow : Window {
 		}
 	}
 };
+
+/** Check the concrete game-options window, never another window of this class. */
+static const GameOptionsWindow *CheckedCompanyOptions(const Window *window)
+{
+	if (window == nullptr) return nullptr;
+	bool live = false;
+	for (const Window *candidate : Window::Iterate()) {
+		if (candidate == window) { live = true; break; }
+	}
+	if (!live || window->window_class != WindowClass::GameOptions ||
+			window->window_number != to_underlying(GameOptionsWindowNumber::GameOptions) || window->IsShaded()) return nullptr;
+	return dynamic_cast<const GameOptionsWindow *>(window);
+}
+
+GameOptionsHit ClassifyGameOptionsHit(const Window *window, Point local)
+{
+	const GameOptionsWindow *options = CheckedCompanyOptions(window);
+	if (options == nullptr || options->nested_root == nullptr) return {};
+	const NWidgetCore *widget = options->nested_root->GetWidgetFromPos(local.x, local.y);
+	if (widget == nullptr || widget->IsDisabled()) return {};
+
+	WidgetID id = widget->GetIndex();
+	/* The Advanced tab must be reachable when this window opens on General. */
+	if (id == INVALID_WIDGET || id == WID_GO_TAB_ADVANCED) return {GameOptionsHitKind::Navigation, {}};
+	if (GameOptionsWindow::active_tab != WID_GO_TAB_ADVANCED) return {};
+
+	switch (id) {
+		case WID_GO_SCROLLBAR:
+		case WID_GO_HELP_TEXT_SCROLL:
+		case WID_GO_EXPAND_ALL:
+		case WID_GO_COLLAPSE_ALL:
+			return {GameOptionsHitKind::Navigation, {}};
+		case WID_GO_OPTIONSPANEL: {
+			auto hit = options->ResolveOptionsPanelHit(local);
+			if (hit.entry == nullptr || hit.x < 0) return {};
+			if (dynamic_cast<SettingsPage *>(hit.entry) != nullptr) return {GameOptionsHitKind::Navigation, {}};
+			const SettingEntry *entry = dynamic_cast<SettingEntry *>(hit.entry);
+			if (entry == nullptr || entry->setting == nullptr || !entry->setting->IsEditable()) return {};
+			return {GameOptionsHitKind::Setting, {entry, entry->setting}};
+		}
+		default:
+			return {};
+	}
+}
+
+std::optional<GameOptionsSettingState> CurrentGameOptionsValueEntry(const Window *window)
+{
+	const GameOptionsWindow *options = CheckedCompanyOptions(window);
+	if (options == nullptr || GameOptionsWindow::active_tab != WID_GO_TAB_ADVANCED) return std::nullopt;
+	const SettingEntry *entry = options->valuewindow_entry;
+	if (entry == nullptr || entry->setting == nullptr || !entry->setting->IsEditable() || !GetSettingsTree().IsVisible(entry)) return std::nullopt;
+	return GameOptionsSettingState{entry, entry->setting};
+}
+
+bool PrepareCompanyPolicyView(Window *window)
+{
+	const GameOptionsWindow *checked = CheckedCompanyOptions(window);
+	if (checked == nullptr || GameOptionsWindow::active_tab != WID_GO_TAB_ADVANCED) return false;
+	auto *options = const_cast<GameOptionsWindow *>(checked);
+	/* Only this window's filter changes; the client restriction preference does not. */
+	options->filter.mode = RM_ALL;
+	options->filter.type = ST_COMPANY;
+	options->filter_editbox.text.DeleteAll();
+	options->filter.string.SetFilterTerm("");
+	GetSettingsTree().UnFoldAll();
+	options->InvalidateData();
+	return true;
+}
 
 static constexpr std::initializer_list<NWidgetPart> _nested_game_options_widgets = {
 	NWidget(NWID_HORIZONTAL),
