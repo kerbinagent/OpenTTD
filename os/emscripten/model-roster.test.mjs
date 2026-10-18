@@ -93,6 +93,23 @@ test('single-flight polling refreshes reports, clears stale data on failure and 
   assert.equal(app.timers.size, 0);
 });
 
+test('Agents keyboard events preserve summary defaults without reaching native window handlers', () => {
+  const app = panel(async () => { throw new Error('Keyboard boundary must not fetch reports'); });
+  const target = app.nodes.get('agents');
+  let stopped = 0, prevented = 0;
+  for (const type of ['keydown', 'keyup', 'keypress']) {
+    const listener = target.listeners.get(type);
+    assert.equal(typeof listener, 'function');
+    listener({ stopPropagation() { stopped++; }, preventDefault() { prevented++; } });
+  }
+  assert.equal(stopped, 3);
+  assert.equal(prevented, 0);
+  assert.equal(target.open, false);
+  assert.equal(app.timers.size, 0);
+  const disabled = panel(async () => {}, false);
+  assert.equal(disabled.nodes.get('agents').listeners.size, 0);
+});
+
 test('an unresponsive report request is aborted and becomes unavailable', async () => {
   const app = panel((path, options) => new Promise((resolve, reject) => {
     options.signal.addEventListener('abort', () => reject(new Error('aborted')));

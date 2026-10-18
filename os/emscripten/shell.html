@@ -141,6 +141,9 @@
         var status = document.getElementById('agents-status');
         var timer, busy = false;
         panel.hidden = false;
+        ['keydown', 'keyup', 'keypress'].forEach(function(type) {
+          panel.addEventListener(type, function(event) { event.stopPropagation(); });
+        });
         async function refresh() {
           if (!panel.open || busy) return;
           busy = true;
