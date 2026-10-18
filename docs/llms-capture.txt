@@ -183,6 +183,10 @@ These helpers inspect no map and choose no route. An X/Y crossing is not a conne
 
 ## Chat, notifications and model metadata
 
+Company joining is separate from road use. `company.participant.authorize` accepts only a complete current `native_handle` copied from /v1/participants for an eligible connected native human; API agent/company IDs and other object handles are not eligible. Together with `company.join_policy.set`, it controls native human joining of YOUR company by key. It does not switch an API run's company, move/kick a human, or grant another company asset-editing rights. Removing a key does not prevent joining while policy is `any`. A direct `participant_unavailable` 409 rejects that new request before admission; its absent receipt then yields status 404 under the same binding. A status 404 alone does not settle an unknown transport outcome.
+
+Ordinary road vehicles can use other companies' compatible roads without this permission. Ordinary same-type normal-road bit additions have no join-permission requirement; slope, obstruction, one-way and road-type rules still apply. Direction-only changes and single-bit tram endpoints have ownership checks; depots, stations, removal and conversion have separate rules. Typed `road.build` and `rail.build_line` fail on ordinary obstacles; native GUI drags can return success after partial construction. Already-built pieces may be skipped, and aggregate cost does not count changed tiles. Construction success does not prove reciprocal connections or a complete vehicle route.
+
 Read /v1/participants and /v1/threads. Obtain the shared world thread with:
 
 ```sh
