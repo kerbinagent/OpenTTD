@@ -146,7 +146,8 @@ def process_paths(state: Path, name: str):
     return directory, directory / "config", directory / "data"
 
 
-def prepare_process(state: Path, name: str, baseset: Path, size: int, *, label="", renderer=False, profile="mixed"):
+def prepare_process(state: Path, name: str, baseset: Path, size: int, *, label="", renderer=False, profile="mixed",
+                    starting_year=None):
     directory, config, data = process_paths(state, name)
     for path in (directory, config, data, config / "openttd", data / "openttd"):
         private_directory(path, create=True)
@@ -160,7 +161,8 @@ def prepare_process(state: Path, name: str, baseset: Path, size: int, *, label="
               + "[gui]\npause_on_newgame = false\nautosave = off\n"
               "[misc]\nlanguage = english.lng\nsavegame_format = lzma:2\n"
               f"[game_creation]\nmap_x = {int(math.log2(size))}\nmap_y = {int(math.log2(size))}\n"
-              + ("starting_year = 1950\nlandscape = temperate\n" if profile in ("luna", "overnight", "public") and not renderer else ""))
+              + (f"starting_year = {1950 if starting_year is None else starting_year}\nlandscape = temperate\n"
+                 if not renderer and (profile in ("luna", "overnight", "public") or starting_year is not None) else ""))
     write_new(config / "openttd" / "private.cfg",
               "[version]\nini_version = 8\n[network]\n"
               f"client_name = {label}\nserver_name = Local mixed world\n")
@@ -192,7 +194,8 @@ def validate_process(state: Path, name: str, args, *, renderer=False):
 def provision(state: Path, args):
     for name in ("ipc", "logs", "credentials", "engine-state"):
         private_directory(state / name, create=True)
-    prepare_process(state, "engine", args.baseset, args.map_size, profile=args.profile)
+    prepare_process(state, "engine", args.baseset, args.map_size, profile=args.profile,
+                    starting_year=args.starting_year)
     for role, worker in args.workers.items():
         prepare_process(state, worker, args.baseset, args.map_size,
                         label=f"mixed-{worker}", renderer=True, profile=args.profile)
@@ -201,9 +204,10 @@ def provision(state: Path, args):
                         label=f"capture-{worker}", renderer=True, profile=args.profile)
     manifest = {"version": 1, "profile": args.profile, "world_id": args.world, "world_epoch": uuid.uuid4().hex,
                 "ready": False, "runs": {}, "renderer_keys": {}}
-    if args.profile in ("luna", "overnight", "public"):
+    if args.profile in ("luna", "overnight", "public") or args.starting_year is not None:
         manifest["generation"] = {"map_size": args.map_size, "seed": args.seed,
-                                  "starting_year": 1950, "landscape": "temperate"}
+                                  "starting_year": 1950 if args.starting_year is None else args.starting_year,
+                                  "landscape": "temperate"}
     store = Store(state / "world.sqlite3", world_id=args.world)
     try:
         if args.profile == "public":
@@ -244,6 +248,9 @@ def load_existing(state: Path, args):
         # Version-1 manifests written before profiles always describe mixed.
         if manifest.get("profile", "mixed") != args.profile:
             raise StartupError("Existing world uses a different launcher profile")
+        if (args.starting_year is not None and
+                manifest.get("generation", {}).get("starting_year") != args.starting_year):
+            raise StartupError("--starting-year differs from the recorded world; restarting loads its checkpoint")
         if (not isinstance(manifest, dict) or manifest.get("version") != 1
                 or manifest.get("world_id") != args.world or not manifest.get("world_epoch")
                 or manifest.get("ready") is not True or set(manifest.get("runs", {})) != set(args.roles)
@@ -629,8 +636,12 @@ def parse_args(argv=None):
     parser.add_argument("--map-size", type=int, choices=(128, 256, 512, 1024),
                         help="new square map size; default 512 for mixed/overnight, 128 for luna")
     parser.add_argument("--seed", type=generation_seed, help="new generated world's seed; luna defaults to 20261018, overnight to 20261021")
+    parser.add_argument("--starting-year", type=int,
+                        help="fresh world's starting year, 0..5000000 (default 1950); restart loads the saved date")
     parser.add_argument("--initial-save", type=Path, help="optional starting save for a new world; restart always uses the checkpoint")
     args = parser.parse_args(argv)
+    if args.starting_year is not None and not 0 <= args.starting_year <= 5000000:
+        parser.error("--starting-year must be between 0 and 5000000")
     if args.profile == "public":
         args.dynamic_agents = True
     if not args.dynamic_agents and args.capture_workers != 2:
@@ -666,6 +677,8 @@ def parse_args(argv=None):
     if len(os.fsencode(args.state_dir / "ipc" / "engine.sock")) >= 104:
         parser.error("--state-dir is too long for private Unix sockets; use a shorter canonical path")
     if args.initial_save:
+        if args.starting_year is not None:
+            parser.error("--starting-year cannot be combined with --initial-save")
         if args.profile != "mixed" or args.seed is not None:
             parser.error("--initial-save is for the mixed profile and cannot be combined with --seed")
         args.initial_save = args.initial_save.resolve()

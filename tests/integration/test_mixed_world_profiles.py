@@ -96,6 +96,25 @@ class OvernightProfileTests(unittest.TestCase):
         self.assertEqual((mixed.map_size, mixed.seed), (512, None))
         self.assertEqual((luna.map_size, luna.seed), (128, 20261018))
 
+    def test_starting_year_matches_native_config_and_manifest_including_zero(self):
+        for profile, year in (("public", 1925), ("public", 0), ("mixed", 1830), ("luna", 5000000)):
+            with self.subTest(profile=profile, year=year):
+                self.state = self.root / f"{profile}-{year}"
+                args = self.arguments(profile, "--starting-year", str(year))
+                manifest = self.provision(args)
+                self.assertEqual(manifest["generation"]["starting_year"], year)
+                config = (self.state / "engine/config/openttd/openttd.cfg").read_text()
+                self.assertIn(f"starting_year = {year}\n", config)
+
+    def test_starting_year_bounds_and_initial_save_conflict(self):
+        for value in ("-1", "5000001", "not-a-year"):
+            with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.arguments("public", "--starting-year", value)
+        initial = self.root / "initial.sav"
+        initial.write_text("save")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.arguments("mixed", "--initial-save", str(initial), "--starting-year", "1925")
+
     def test_restart_accepts_only_matching_profile_and_rejects_initial_save(self):
         args = self.arguments()
         manifest = self.provision(args)
@@ -109,6 +128,16 @@ class OvernightProfileTests(unittest.TestCase):
             "checkpoint": {"save_path": str(save), "checkpoint_id": "checkpoint-1"}}}))
         restarted, selected = mixed_world.load_existing(self.state, args)
         self.assertEqual((restarted["world_epoch"], selected), (manifest["world_epoch"], save))
+        same_year = self.arguments("overnight", "--starting-year", "1950")
+        self.assertEqual(mixed_world.load_existing(self.state, same_year)[1], save)
+        with self.assertRaises(mixed_world.StartupError):
+            mixed_world.load_existing(self.state, self.arguments("overnight", "--starting-year", "1925"))
+        del manifest["generation"]
+        mixed_world.publish_manifest(self.state, manifest)
+        with self.assertRaises(mixed_world.StartupError):
+            mixed_world.load_existing(self.state, same_year)
+        # Missing historical generation metadata still permits ordinary restart.
+        self.assertEqual(mixed_world.load_existing(self.state, args)[1], save)
         for other in ("mixed", "luna"):
             with self.subTest(other=other), self.assertRaises(mixed_world.StartupError):
                 mixed_world.load_existing(self.state, self.arguments(other))
