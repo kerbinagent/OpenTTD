@@ -91,6 +91,88 @@ Evidence: `/tmp/openttd-question-png-proof05/evidence.json` (SHA-256 `016989dc27
 
 Maximum-map platform dependency cost is [measured separately](industry-platform-proof.md#measured-maximum-map-cost): on the attributed debug test build, 20 fresh 4096 × 4096 scans had a 1,779 ms median and 1,894 ms p95. Those are helper timings excluding setup, not end-to-end gesture latency. The later lifecycle and finite UI controls are included in the corrected shared-actuator snapshot above. The older `bd6fa099…` results remain historical validation, not a final release. Full semantic parity and the four-company gameplay gate remain unproved. The historical foundation measurements below retain their original build attribution.
 
+## Selected native observations and model image delivery
+
+Capture core commit `e386adfdfa` adds the selected map/panel routes and MCP image
+tools described in the [capture guide](capture-controls.md). Independent
+architecture review preceded implementation; separate correctness reviews covered
+native drawing, backend ownership/barriers/retries, transport admission and the
+adapter. The attributed native executable is SHA-256
+`3de7b4d33cb081b057ca5bcbde52964db90a251ec78369810a68fb4041bc1f94`,
+preserved at `/tmp/ottd-capture-native-freeze01/openttd`. It excludes the later
+depot-direction change. Evidence and source hashes are collected in
+`/tmp/ottd-capture-milestone01/evidence.json`.
+
+| Validation | Observed result |
+| --- | --- |
+| Native build and unit suite | 240 cases / 116,174 assertions passed, from the build directory with its generated language data |
+| Native script regressions | All four passed with the required OpenGFX base set available |
+| Integration-disabled compilation | Both changed GUI translation units compiled to private objects; the pristine executable was not rebuilt |
+| Backend suite | 380 discovered: 379 passed, one optional JSON Schema dependency skip; that schema case passed separately under the system Python with the dependency installed |
+| Public player journal recovery | Three cases passed, including a lost completed reply, exact original references and Boolean/integer conflicts |
+| Public selected-capture fixture | Fresh 256-square world: map center/zoom/image-point, exact retries/conflicts, finance layouts, directory sorting/scrolling, causal rename and input-proof separation passed |
+| Forced renderer lag | An old native interaction lease held replay back; a new after-action read returned `replica_pending` 74 times, then the identical request succeeded after natural expiry at 40.68 seconds; the full fixture took 40.78 seconds |
+
+The standard public fixture received 13 PNG responses through 16 selected POST
+attempts, including one exact retry, one expected busy response, an identity
+conflict and an unknown source-image rejection. It received 2,744,061 pixels / 1,328,803 PNG bytes;
+native render count was not instrumented. Genuine directory pixels showed the
+top row move from Benfingway to Brefingfield after two rows of scrolling among
+24 towns. Separate native PNGs confirmed town labels present, absent and present
+again across requests, plus ordinary void borders at valid edge centers; the
+invalid freeform-border tile `(0,0)` was rejected. Station, waypoint, sign and
+competitor label categories were not semantically exercised.
+
+The lag fixture first recovered the unchanged pre-action PNG under its original
+read identity. Its new causally fenced request stayed pending while the renderer
+was parked and then returned a distinct image; no input, cancellation or action
+replay released the lease. A subsequent native finance image visibly showed
+`Forced Lag 2fa869`, matching the completed rename. Evidence:
+`/tmp/ottd-capture-live-final01/result.json`,
+`/tmp/ottd-capture-live-final01/operator-visual-validation.json`,
+`/tmp/ottd-capture-labels01/operator-visual-validation.json`, and
+`/tmp/ottd-capture-forced-lag01/result.json`.
+
+An independent Luna player actually received five image blocks and read its
+finance values and largest town, selected a feature in an overview and zoomed
+into it, and verified the renamed finance title in an after-action image. Its
+adapter audit records 14 HTTP attempts: five capability bootstraps, five selected
+POSTs, one action POST and three action-status reads. The test host deliberately
+started a fresh adapter per tool call; a persistent host can retain bootstrap.
+Two malformed host invocations before execution remain recorded in the actor's
+findings. Image emission alone is not used as evidence of model perception;
+the actor's answers refer to the delivered image digests.
+
+A separate Luna used the older screenshot/control flow to read the same finance
+fields: three successful tool calls, two 1280×720 screenshots and five HTTP
+requests, delivering 1,843,200 pixels / 1,361,656 bytes. The selected finance task
+used one tool call, one 421×479 native image (201,659 pixels / 13,479 bytes), and
+one bootstrap GET plus one PNG POST. Both were legible. These representative
+tasks used different companies and world sizes; their host timing definitions
+also differ. They establish fewer calls and delivered pixels for this report,
+not a controlled latency speedup. Evidence:
+`/tmp/ottd-luna-selected-capture01/findings.json`, its
+`operator-http-audit.json`, and
+`/tmp/ottd-luna-legacy-capture01/findings.json`.
+
+Reproduce the public fixture on a disposable, already running visual company:
+
+```sh
+python tests/integration/selected_observations.py --origin "$QA_ORIGIN" \
+  --token-file "$QA_TOKEN_FILE" --artifacts /tmp/selected-observation-check \
+  --center-x 128 --center-y 128 --require-scroll-change
+python tests/integration/selected_observations.py --origin "$QA_ORIGIN" \
+  --token-file "$QA_TOKEN_FILE" --artifacts /tmp/selected-observation-lag \
+  --center-x 128 --center-y 128 --forced-lag
+```
+
+The second invocation needs a natural native input lease shorter than its
+45-second deadline. These are finite capture/recovery checks, not autonomous
+business acceptance. Full semantic parity, economic success for capture players,
+broader native-panel coverage and long-running stability of this new snapshot
+remain open. The earlier overnight world was cleanly stopped at the user's
+request; its save, credentials and logs were preserved.
+
 ## Build and host
 
 The baseline is `c0d5c0b3fc2588ac001e301e97ce795aefb8a90c`. The earlier foundation executable has SHA-256 `257ad478d3a47edf178f425ccd1db25c4085aa110b42ee242babb3f41493f20a`. Its native-generated public catalog has SHA-256 `e6bb8f667c2ae37d0a1a072569de7a285756cf1e6add27387e0ee6a2ce17d627`. Python dependencies are pinned in [requirements.txt](../backend/requirements.txt).
