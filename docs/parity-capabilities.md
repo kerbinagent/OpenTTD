@@ -1,6 +1,6 @@
 # Human company capability matrix
 
-This records the implemented source contract inspected on 2026-10-17, not a
+This records the implemented source contract inspected on 2026-10-18, not a
 completed gameplay-parity gate. The reference is normal multiplayer company
 play, including actions enabled by ordinary game settings. Administration,
 cheats, scenario editing, script authoring and local preferences are excluded.
@@ -10,7 +10,7 @@ remain separate requirements. A running frozen world may expose an earlier
 catalog: use that world's public capabilities, not this document, as its API.
 
 The [central registry](../src/integration/actions.cpp) contains **103 typed
-actions**, plus `ui.apply`, and **59 text queries**. Its action entries admit
+actions**, plus `ui.apply`, and **60 text queries**. Its action entries admit
 **97 distinct native commands**. The [native enum](../src/command_type.h) has
 146 real commands, excluding `End`: 97 admitted, six composable conveniences
 and 43 excluded/internal commands. These disjoint counts describe coverage,
@@ -24,8 +24,8 @@ genuine PNGs; structured world queries remain unavailable. Typed writes need no
 screenshot. Ordinary command feedback includes success, charged cost, native
 errors and created references, without report or refit-capacity data.
 `ui.apply` is an optional image-bound path through ordinary native widgets.
-This corrected shared-actuator contract is being integrated; a frozen runtime
-must advertise it before players can rely on it.
+This corrected shared-actuator contract has matching native and public HTTP
+validation; a frozen runtime must advertise it before players can rely on it.
 The native allowlist is derived from the central action registry rather than a
 second family-maintained list. Admission is permission to attempt a command;
 normal availability, ownership, funds and construction rules still decide it.
@@ -59,7 +59,7 @@ route planner or general batch scheduler.
 
 ## Decision-making observations
 
-All 59 queries are text-only. They return bounded positive DTOs and native
+All 60 queries are text-only. They return bounded positive DTOs and native
 choices rather than packed structures or a second rendering tree. Ordinary
 public windows can expose another company's station/vehicle/finance details;
 mutation ownership remains stricter. Owned fleet lists, refit operations,
@@ -78,7 +78,15 @@ specific permission checks.
 | Construction choices and editable signs | `catalog.objects`, `catalog.houses`, `catalog.industries`, `catalog.trees`, `signs` | Normal selectable specs, dimensions/views/settings and editable sign handles; entity and spec scans have explicit continuations. |
 | Towns, industries and subsidies | `towns`, `town.detail`, `town.authority`, `industries`, `industry.details`, `industry.monthly_stats`, `subsidies` | Public population/growth/cargo, local authority ratings/actions, industry acceptance/production/history and subsidy information. Readers do not execute industry callbacks as an observation shortcut. |
 | Goals, questions, stories and leagues | `goal.questions`, `goal.question`, `story.pages`, `story.elements`, `story.element`, `story.vehicle_candidates`, `goals`, `league.performance`, `league.tables`, `league.table.entries` | Own/global visibility, complete text continuations and current page/issuance versions. Text question inbox ordering is explicit and does not mirror independent client popup stacks. |
+| Custom GameScript news | `news.custom` | Recipient-scoped current-boot metadata, incarnation-fenced cursors and explicit retention gaps. Selected bodies use live native rendering through `display.text`; [news bounds and semantics](custom-news.md) are explicit. |
 | Long human-visible display text | `display.text` | Finite approved text kinds/targets, UTF-8 byte continuation and content-version checks; no arbitrary StringID, format arguments or hidden state. |
+
+Both modes can also read shared pause metadata through `GET /v1/world/status`
+and receive `world.status` events. Native command permissions apply while paused;
+the saved policy cannot change during multiplayer. Host pause controls remain
+outside normal company permissions. See [pause behavior](pause-state.md) for
+revision/fence handling and queued-command rejection, and [land information](land-info.md)
+for query-local callback writes, native clearing checks and shared admission.
 
 Handles are strict `{id,generation,engine_instance_id}` values from observations,
 creation acknowledgements or the finite `control.reference` operation. The
@@ -145,7 +153,18 @@ Approval of those designs is not proof of implementation correctness or gameplay
 acceptance. Central registry/schema/target integration and backend projections
 remain separate review responsibilities.
 
-The validated `bd6fa099…` native snapshot has an actual 104-action/56-query
+The latest validated native snapshot has SHA-256
+`1c5a2eaa11b4443e70a2d231f4e8f78d8765e4e4aef52588aac02772f28c9f43`.
+Its actual catalog contains 104 actions / 60 queries with BLAKE2b-256
+`083a13031161b652d3892f756d1dc5a097f8b1991383174a075ce2fa09ff85a3`.
+All 240 native cases / 116,174 assertions, 12 native live tests and 277 backend
+tests passed. Public pause and renderer fixtures retain their separately
+recorded pause/news build attribution. Technical checks establish their tested
+interfaces; they do not establish successful autonomous businesses or release
+closure. Detailed evidence is in the
+[validation record](integration_validation.md#expanded-acceptance-criteria).
+
+The earlier validated `bd6fa099…` native snapshot has an actual 104-action/56-query
 catalog with BLAKE2b-256
 `62b25b961f2b7be96d50a37e62cbbc9f47128ffa2e151ee3bb092ce076b57cf1`.
 Its matching native suite passed 170 cases and 109,110 assertions; the backend
@@ -162,9 +181,9 @@ proof passed; duplicate visual-popup validation remains pending.
 is measured on its attributed debug test build: 20 fresh 4096 × 4096 scans had
 a 1,779 ms median and 1,894 ms p95, excluding setup. End-to-end publication
 latency and broader conservative-staleness behavior remain separate checks.
-The upcoming reviewed lifecycle fix and two finite UI controls require another
-matching build, catalog and validation; the validated snapshot is not a final
-release. Historical build/load results do not transfer to later source.
+The subsequent lifecycle fix and finite UI controls are included in the
+corrected shared-actuator snapshot. Historical build/load results do not
+transfer to later source.
 
 Both original fresh Luna windows and the separate 23:20–23:50 continuation
 failed overall under a GUI-only restriction: neither visual company operated a
@@ -176,7 +195,13 @@ order on a stopped bus; company 3 had no service assets. Company 0 used company
 1-owned road after repairs, without reciprocal use or two operating competitors.
 The common static UI reference supplied at 23:35 is explicitly recorded as
 assistance. These trials used an earlier frozen runtime and do not establish
-the newer snapshot's gameplay result. Full semantic parity, the four-company
-gate and release closure remain unproved; the strict cutoff, financial limits
-and report hash are in the
-[acceptance record](integration_validation.md#expanded-acceptance-criteria).
+the newer snapshot's gameplay result.
+
+The corrected 90-minute [four-Luna trial](luna-trial-03.md) used genuine image
+perception with shared typed actions on its frozen `165a44…` runtime. Both text
+companies earned transport revenue, expanded after income and earned more;
+both capture companies earned zero revenue. Their depot exits were disconnected
+from the road network. Direct partner chat reached all four clients, but useful
+reciprocal road use and two paid competing services were not established.
+Image-use and history-scope qualifications remain explicit in that record.
+Full semantic parity, the four-company gate and release closure remain unproved.
