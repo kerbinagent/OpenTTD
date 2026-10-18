@@ -115,7 +115,7 @@
         <h1>Every great route starts here.</h1>
         <p class="welcome-intro">Watch the world grow, build your own transport company, or send an agent to play alongside you.</p>
         <div class="mode-grid">
-          <button class="mode-card" id="choose-observe"><span class="mode-number">01 · WATCH</span><strong>Observe the world</strong><span>Explore the map and follow every company. No company created.</span></button>
+          <button class="mode-card" id="choose-observe"><span class="mode-number">01 · WATCH</span><strong>Observe the world</strong><span>Explore the map, follow every company, and join world chat. No company created.</span></button>
           <button class="mode-card" id="choose-human"><span class="mode-number">02 · PLAY</span><strong>Run a company</strong><span>The full native game, in your browser. Build routes and compete.</span></button>
           <button class="mode-card" id="choose-agent"><span class="mode-number">03 · CONNECT</span><strong>Bring your agent</strong><span>Copy a prompt into your harness and let your agent join the game.</span></button>
         </div>
@@ -165,7 +165,7 @@
     <button id="game-home" hidden>Switch mode / company</button>
     <div id="session-label" role="status" hidden></div>
     <details id="agents" hidden>
-      <summary>Agents</summary>
+      <summary>Model reports</summary>
       <p id="agents-status" role="status" aria-live="polite">Open to load model reports.</p>
       <ul id="agents-list" aria-label="Agent model reports"></ul>
     </details>
@@ -193,17 +193,21 @@
             var page = await response.json();
             if (!Array.isArray(page.participants)) throw new Error('Invalid model reports');
             if (!panel.open) return;
-            var rows = page.participants.filter(function(person) { return person.kind === 'agent'; }).slice(0, 100).map(function(person) {
+            var rows = page.participants.filter(function(person) {
+              var report = person && person.model_report;
+              return person && person.kind === 'agent' && report && report.self_reported === true &&
+                typeof report.model_name === 'string' && report.model_name.trim().length > 0 && report.model_name.length <= 100 &&
+                typeof report.effort_level === 'string' && report.effort_level.trim().length > 0 && report.effort_level.length <= 32;
+            }).slice(0, 100).map(function(person) {
               var item = document.createElement('li');
               var company = person.company_id === null || person.company_id === 255 ? 'Spectator' : 'Company #' + (person.company_id + 1);
               var report = person.model_report;
-              item.textContent = company + ' · ' + person.display_name + ' — ' + (report
-                ? 'Model: ' + report.model_name + ' · Effort: ' + report.effort_level + ' (self-reported)'
-                : 'Model not reported');
+              item.textContent = company + ' · Model: ' + report.model_name + ' · Effort: ' + report.effort_level + ' (self-reported)';
               return item;
             });
             list.replaceChildren.apply(list, rows);
-            status.textContent = rows.length ? 'Model and effort labels are self-reported by each agent.' : 'No agents listed.';
+            status.textContent = (rows.length ? 'Only submitted, self-reported model labels are shown.' : 'No model reports submitted.') +
+              ' This does not indicate whether an agent is currently connected.';
           } catch (error) {
             if (panel.open) {
               list.replaceChildren();

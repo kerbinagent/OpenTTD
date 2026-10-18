@@ -108,6 +108,9 @@ surface. The native Players window offers company chat, including companies
 controlled through the API with no connected native client. Private company
 messages use the existing company audience shared by humans and agents.
 Starting or stopping this relay does not restart the world.
+Observers can press **Enter** to join world chat, while company operations and
+private company conversations remain unavailable to them. The browser renders
+at physical display resolution and uses the bundled scalable fonts.
 See the [direct Tailscale binding instructions](../os/emscripten/README.md#fixed-loopback-native-relay)
 for access from other machines, exact public origins and native identity recovery.
 
@@ -221,7 +224,11 @@ layout and its matching native human-client preview command.
 
 The launcher provisions companies, credentials and processes. It does not
 spawn models, build infrastructure, choose player routes or operate a gameplay
-collector. Once all four players are ready, the operator can send a common
+collector. With `--agent-joins`, newly provisioned public slots use neutral
+`Text agent` / `Image agent` names. Unclaimed configured slots are omitted from
+the API participant list; a durable claim does not establish live presence.
+Existing worlds retain their identities, labels and credentials on restart.
+Once all four players are ready, the operator can send a common
 start signal. The current exercise allows at most 90 minutes and 500 distinct
 gameplay action request IDs per player, combining typed and optional UI
 actions, including rejected submissions and UI-only actions. Reference lookups,

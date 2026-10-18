@@ -448,7 +448,9 @@ NetworkRecvStatus ClientNetworkGameSocketHandler::SendCommand(const CommandPacke
 NetworkRecvStatus ClientNetworkGameSocketHandler::SendChat(NetworkAction action, NetworkChatDestinationType type, int dest, std::string_view msg, int64_t data)
 {
 #ifdef __EMSCRIPTEN__
-	if (BrowserReadOnly()) return NetworkRecvStatus::Okay;
+	/* Observers can talk to the world without acquiring company privileges.
+	 * Broadcast ignores dest (the native spectator shortcut supplies 255). */
+	if (BrowserReadOnly() && (action != NetworkAction::ChatBroadcast || type != NetworkChatDestinationType::Broadcast)) return NetworkRecvStatus::Okay;
 #endif
 	Debug(Facility::Net, Severity::Trace3, "Client::SendChat(): action={}, type={}, dest={}", action, type, dest);
 

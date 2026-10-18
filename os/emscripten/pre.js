@@ -40,6 +40,27 @@ Module['websocket'] = { url: function(host, port, proto) {
 } };
 
 Module.preRun.push(function() {
+    /* A monitor/zoom change can alter density without a window resize.
+     * Wake SDL's existing resize handler; SDL owns the canvas and its ratio. */
+    function watchDisplayScale() {
+        if (typeof window.matchMedia !== 'function') return;
+        var media = window.matchMedia('(resolution: ' + window.devicePixelRatio + 'dppx)');
+        var remove;
+        function changed() {
+            remove();
+            watchDisplayScale();
+            window.dispatchEvent(new Event('resize'));
+        }
+        if (media.addEventListener && media.removeEventListener) {
+            remove = function() { media.removeEventListener('change', changed); };
+            media.addEventListener('change', changed);
+        } else if (media.addListener && media.removeListener) {
+            remove = function() { media.removeListener(changed); };
+            media.addListener(changed);
+        }
+    }
+    watchDisplayScale();
+
     personal_dir = '/home/web_user/.openttd';
     content_download_dir = personal_dir + '/content_download'
 

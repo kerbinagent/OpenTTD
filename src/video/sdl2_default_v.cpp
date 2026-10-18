@@ -141,6 +141,13 @@ bool VideoDriver_SDL_Default::AllocateBackingStore(int w, int h, bool force)
 
 	if (!force && w == _sdl_real_surface->w && h == _sdl_real_surface->h) return false;
 
+#ifdef __EMSCRIPTEN__
+	/* SDL's software framebuffer includes the display's pixel ratio. The
+	 * optional 8-bit shadow must have the same physical dimensions. */
+	w = _sdl_real_surface->w;
+	h = _sdl_real_surface->h;
+#endif
+
 	/* Free any previously allocated rgb surface. */
 	if (_sdl_rgb_surface != nullptr) {
 		SDL_FreeSurface(_sdl_rgb_surface);

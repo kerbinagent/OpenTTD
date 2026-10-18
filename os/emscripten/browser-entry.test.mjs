@@ -174,6 +174,36 @@ test('native startup waits for identity flush, and storage failures leave startu
   }
 });
 
+test('display density changes wake SDL without accumulating media listeners', () => {
+  for (const legacy of [false, true]) {
+    const a = bootstrap(), queries = [], resizes = [];
+    a.env.Event = class { constructor(type) { this.type = type; } };
+    a.env.window.devicePixelRatio = 1;
+    a.env.window.dispatchEvent = event => resizes.push(event.type);
+    a.env.window.matchMedia = query => {
+      const listeners = new Set();
+      const media = legacy ? {
+        addListener: listener => listeners.add(listener), removeListener: listener => listeners.delete(listener)
+      } : {
+        addEventListener: (type, listener) => listeners.add(listener), removeEventListener: (type, listener) => listeners.delete(listener)
+      };
+      queries.push({query, listeners});
+      return media;
+    };
+    a.env.Module.preRun[0]();
+    for (const ratio of [2, 1.25, 1]) {
+      const previous = queries.at(-1);
+      assert.equal(previous.listeners.size, 1);
+      a.env.window.devicePixelRatio = ratio;
+      [...previous.listeners][0]();
+      assert.equal(previous.listeners.size, 0);
+      assert.equal(queries.at(-1).query, '(resolution: ' + ratio + 'dppx)');
+      assert.equal(queries.reduce((sum, entry) => sum + entry.listeners.size, 0), 1);
+    }
+    assert.deepEqual(resizes, ['resize', 'resize', 'resize']);
+  }
+});
+
 test('HTTP without Web Locks starts normally and copy uses its synchronous fallback', async () => {
   const a = app({webLocks: false, clipboard: false});
   a.click('choose-agent'); await a.click('copy-agent-prompt');

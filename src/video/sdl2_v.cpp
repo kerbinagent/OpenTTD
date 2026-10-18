@@ -155,6 +155,10 @@ bool VideoDriver_SDL_Base::CreateMainWindow(uint w, uint h, uint flags)
 	if (this->sdl_window != nullptr) return true;
 
 	flags |= SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
+#ifdef __EMSCRIPTEN__
+	/* Keep the canvas backing store at the display's physical resolution. */
+	flags |= SDL_WINDOW_ALLOW_HIGHDPI;
+#endif
 
 	if (_fullscreen) {
 		flags |= SDL_WINDOW_FULLSCREEN;
@@ -434,8 +438,24 @@ bool VideoDriver_SDL_Base::PollEvent()
 				}
 			}
 
+#ifdef __EMSCRIPTEN__
+			int window_width, window_height;
+			/* SDL mouse positions use logical window coordinates, while our
+			 * software surface uses physical pixels. Use the actual sizes to
+			 * account for fractional display scaling and integer rounding. */
+			SDL_GetWindowSize(this->sdl_window, &window_width, &window_height);
+			if (window_width <= 0 || window_height <= 0) break;
+			x = static_cast<int64_t>(x) * _screen.width / window_width;
+			y = static_cast<int64_t>(y) * _screen.height / window_height;
+#endif
 			if (_cursor.UpdateCursorPosition(x, y)) {
+#ifdef __EMSCRIPTEN__
+				SDL_WarpMouseInWindow(this->sdl_window,
+					static_cast<int64_t>(_cursor.pos.x) * window_width / _screen.width,
+					static_cast<int64_t>(_cursor.pos.y) * window_height / _screen.height);
+#else
 				SDL_WarpMouseInWindow(this->sdl_window, _cursor.pos.x, _cursor.pos.y);
+#endif
 			}
 			HandleMouseEvents();
 			break;

@@ -400,6 +400,43 @@ bounded proxy traffic, exact Host/Origin, metadata, streaming/disconnect cleanup
 and narrow explicit client transport opt-in with environment proxies disabled.
 The separate 512-square world retained its engine instance throughout deployment.
 
+### High-DPI fonts, model reports and spectator chat (2026-10-18)
+
+The browser now enables the official Emscripten FreeType port and SDL high-DPI
+surfaces. Existing bundled fonts supply scalable text. Mouse positions cross
+the SDL logical/physical boundary once; the optional 8-bit shadow uses physical
+dimensions. A single resolution media-query listener wakes SDL when density
+changes without a resize. Native interface/font preferences remain in control.
+Independent design reviews preceded implementation and a separate correctness
+review approved the final build.
+
+Chrome verified unchanged 1920×1080 CSS dimensions at DPR 1, 1.25 and 2 with
+1920×1080, 2400×1350 and 3840×2160 backing pixels. Checks also covered fractional
+rounding, fullscreen entry/exit, title dragging and right-drag panning, both
+32-bit and 8-bit rendering, and a retained explicit interface scale of 200.
+Font logs confirm the actual OpenTTD Sans, Small and Serif TrueType faces.
+An initial QA Chrome process exited with SIGTERM; no cause was attributed.
+A fresh owned browser repeated the fullscreen/fractional-resize checks
+successfully, without a runtime exception.
+
+Browser observers can now use native Enter world chat while gameplay, company
+changes, private chat and RCON remain blocked. An actual spectator message
+reached a company API client's persisted world history with a human sender and
+no company. The model widget shows only submitted self-reports, omits inherited
+slot names, and explicitly disclaims live presence. The canonical participant
+projection hides only unclaimed configured admission slots, preserving non-pool
+operator agents; new public slots have neutral names. That backend source fix
+does not migrate or hot-patch the running world's identities.
+
+Validation passed 23 JavaScript and 17 relay tests; the canonical roster patch
+passed 79 focused backend/launcher tests plus an independent existing-world
+restart fixture. Runtime evidence is `/tmp/ottd-hidpi-qa.jsonl`,
+`/tmp/ottd-browser-hidpi-acceptance.json`, the `ottd-hidpi-*.png` screenshots and
+`/tmp/ottd-browser-entry-release05-manifest.json`. The headless software-browser
+4K RAF sample had median 50 ms and p95 50.1 ms; it does not establish native
+desktop performance. The separate live 512-square world retained engine instance
+`2211abf5b41369da1add11f958517ebb` and remained unpaused during browser deployment.
+
 ## Agent model reports
 
 Commit `a9fa600fda` adds authenticated `PUT /v1/me/model` with

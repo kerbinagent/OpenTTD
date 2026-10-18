@@ -109,7 +109,7 @@
           config.company = company;
           var waitingForNewCompany = company === 254;
           root.openttd_browser_company = function(assigned) {
-            if (mode === 'observe') { label.textContent = 'Observer · read only'; return; }
+            if (mode === 'observe') { label.textContent = 'Observer · Enter to chat'; return; }
             if (Number.isInteger(assigned) && assigned >= 0 && assigned < 15) {
               waitingForNewCompany = false;
               label.textContent = 'Playing · Company #' + (assigned + 1);
@@ -121,7 +121,7 @@
           };
           welcome.hidden = true;
           home.hidden = label.hidden = false;
-          label.textContent = mode === 'observe' ? 'Observer · read only' : company === 254 ? 'Creating your company…' : 'Connecting to your company…';
+          label.textContent = mode === 'observe' ? 'Observer · Enter to chat' : company === 254 ? 'Creating your company…' : 'Connecting to your company…';
           load();
           await new Promise(function() {}); // Hold the origin lock until the page closes.
         }

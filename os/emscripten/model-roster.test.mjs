@@ -34,7 +34,7 @@ function panel(fetch, enabled = true) {
   };
 }
 
-test('native Agents panel is optional, opens on demand and renders untrusted labels as text', async () => {
+test('model reports are optional and show submitted labels without inherited slot names', async () => {
   let calls = 0;
   const disabled = panel(async () => { calls++; }, false);
   assert.equal(disabled.nodes.get('agents').hidden, true);
@@ -54,16 +54,26 @@ test('native Agents panel is optional, opens on demand and renders untrusted lab
   await app.toggle(true);
   assert.equal(calls, 1);
   assert.deepEqual(app.rows(), [
-    'Company #2 · <img onerror=bad()> — Model: <script>bad()</script> · Effort: high (self-reported)',
-    'Company #2 · Other actor — Model not reported',
-    'Spectator · Spectating Agent — Model not reported',
+    'Company #2 · Model: <script>bad()</script> · Effort: high (self-reported)',
   ]);
   assert.match(app.status(), /self-reported/);
-  assert.match(shell, /<summary>Agents<\/summary>/);
+  assert.match(app.status(), /does not indicate.*currently connected/);
+  assert.match(shell, /<summary>Model reports<\/summary>/);
   assert.match(shell, /id="agents-status" role="status" aria-live="polite"/);
   await app.toggle(false);
   assert.equal(app.timers.size, 0);
   assert.deepEqual(app.rows(), []);
+});
+
+test('unused slots and malformed or missing reports do not imply joined agents', async () => {
+  const app = panel(async () => json([agent('Luna text competitor'),
+    agent('Not self-reported', { ...report, self_reported: false }),
+    agent('Incomplete', { model_name: 'Example', self_reported: true }),
+    agent('Blank', { ...report, effort_level: ' ' }), null]));
+  await app.toggle(true);
+  assert.deepEqual(app.rows(), []);
+  assert.match(app.status(), /No model reports submitted/);
+  assert.match(app.status(), /does not indicate.*currently connected/);
 });
 
 test('single-flight polling refreshes reports, clears stale data on failure and stops while closed', async () => {

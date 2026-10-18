@@ -375,11 +375,8 @@ if(EMSCRIPTEN)
     target_link_libraries(WASM::WASM INTERFACE "-s EXPORTED_FUNCTIONS='[\"_main\", \"_em_openttd_add_server\"]' -s EXPORTED_RUNTIME_METHODS='[\"cwrap\", \"HEAPU8\"]'")
 
     # Preload all the files we generate during build.
-    # As we do not compile with FreeType / FontConfig, we also have no way to
-    # render several languages (like Chinese, ..), so where do you draw the
-    # line what languages to include and which not? In the end, especially as
-    # the more languages you add the slower downloading becomes, we decided to
-    # only ship the English language.
+    # Ship English and the bundled scalable fonts. Additional languages may
+    # need other fonts, and increase the initial download size.
     target_link_libraries(WASM::WASM INTERFACE "--preload-file ${CMAKE_BINARY_DIR}/baseset@/baseset")
     target_link_libraries(WASM::WASM INTERFACE "--preload-file ${CMAKE_BINARY_DIR}/lang/english.lng@/lang/english.lng")
     target_link_libraries(WASM::WASM INTERFACE "--preload-file ${CMAKE_SOURCE_DIR}/bin/ai@/ai")

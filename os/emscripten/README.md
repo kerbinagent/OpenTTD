@@ -59,8 +59,10 @@ Open http://127.0.0.1:18087/ (or http://localhost:18087/). The relay always bind
 `--native-port` select finite ports at startup; browser requests cannot change
 them. The entry page offers **Observe**, **Run a company**, and **Bring your
 agent**. Observation joins as a native spectator and blocks outbound gameplay,
-company changes, chat and remote-console commands. It creates no company.
-Human play offers native new-company creation or the native Players window to
+company changes and remote-console commands. It creates no company.
+Press **Enter** as an observer to send world chat. Observers cannot send
+company or private chat. Human play offers native new-company creation or the
+native Players window to
 join an existing company, subject to the usual company permissions.
 
 Pass `--world-id WORLD_EPOCH --api-port API_PORT` for company recovery and agent
@@ -104,6 +106,13 @@ The Fullscreen button uses the browser Fullscreen API. SDL2 follows the viewport
 resize and updates the native game surface and input coordinates. Native SDL
 handles pointer, wheel and keyboard input.
 
+The browser uses SDL's high-DPI framebuffer and the bundled OpenTTD TrueType
+fonts through the Emscripten FreeType port. Canvas pixels follow display scaling,
+including fractional scaling, window resizing and fullscreen. Pointer positions
+are converted from SDL window coordinates into game pixels. The native Game
+options retain their interface scale and sprite-font preferences; automatic
+interface scaling adjusts to the framebuffer resolution.
+
 For access across your own Tailscale machines, bind the browser listener directly
 to its exact Tailscale IPv4 address. The game and API remain on loopback:
 
@@ -133,10 +142,10 @@ python3 tools/browser_client.py /absolute/path/to/public-build \
   --metadata-port 18085 --metadata-token-file /absolute/path/to/human.token
 ```
 
-The **Agents** panel lists each agent's company, name and optional self-reported
-model and effort. Reports are supplied by agents through `PUT /v1/me/model` and
-are labels rather than verified runtime information. Missing reports say
-"Model not reported". The panel refreshes on opening and every 15 seconds while
+The **Model reports** panel lists submitted model and effort reports with their
+company number. Reports are supplied by agents through `PUT /v1/me/model` and
+are labels rather than verified runtime information. Slots without a report
+are omitted; the panel does not indicate live agent presence. The panel refreshes on opening and every 15 seconds while
 open; failures clear old labels and display unavailable. Closing it stops polling.
 
 The relay holds the supplied credential on the server and uses it only for a
