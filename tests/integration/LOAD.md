@@ -77,6 +77,14 @@ The driver checks provenance structure, checksums and the loaded entities. It
 does not independently attest the claimed construction history or checkpoint
 completion; retain the source action ledger when that history must be audited.
 
+Each native process selects its owned config explicitly with `-c` and disables
+host search paths with `-X`. Keep the complete pinned baseset and language files
+beside the copied executable. Before starting renderers, setup checks the four
+visual companies' join policy and uses the public action API to permit joining
+when necessary. This setup and its request IDs are recorded outside the timed
+workload. A frozen copy without Git metadata reports that metadata as unavailable;
+its measured executable, backend and driver hashes remain the runtime identities.
+
 Results are owner-only `configuration.json`, `manifest.json`, raw
 `samples.jsonl`, provisional `summary.json`, and authoritative
 `audited-summary.json` (or `failure.json`). The manifest identifies

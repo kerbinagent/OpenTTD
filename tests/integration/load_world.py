@@ -176,6 +176,27 @@ def file_sha256(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def source_revision_metadata(root):
+    """A frozen copy has no repository revision; its file hashes remain authoritative."""
+    if not (root / ".git").exists():
+        return {"git_head": None, "git_status": None,
+                "git_metadata_reason": "runtime_root_has_no_git_metadata", "runtime_root": str(root)}
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    try:
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, env=environment, text=True).strip()
+        status = subprocess.check_output(["git", "status", "--short"], cwd=root, env=environment, text=True)
+        return {"git_head": head, "git_status": status, "git_metadata_reason": None, "runtime_root": str(root)}
+    except (OSError, subprocess.CalledProcessError):
+        return {"git_head": None, "git_status": None,
+                "git_metadata_reason": "git_metadata_unavailable", "runtime_root": str(root)}
+
+
+def runtime_manifest_metadata(root):
+    path = root / "benchmark-runtime-manifest.json"
+    return {"runtime_manifest_path": str(path) if path.is_file() else None,
+            "runtime_manifest_sha256": file_sha256(path) if path.is_file() else None}
+
+
 def percentile(values, fraction):
     """Nearest-rank percentile, preserving the explicit empty denominator."""
     return sorted(values)[max(0, math.ceil(len(values) * fraction) - 1)] if values else None
@@ -391,9 +412,21 @@ class FreshWorld(LiveWorld):
             "[version]\nini_version = 8\n[network]\nframe_freq = 0\n"
             "server_name = Load benchmark\nmax_lag_time = 500\n", encoding="utf-8")
 
+    def command(self, save=None):
+        selected = save or self.initial_save
+        command = [str(self.binary), "-D", f"127.0.0.1:{self.port}"]
+        if selected:
+            command.extend(["-g", str(selected)])
+        else:
+            command.extend(["-G", str(self.seed), "-g", "-t", "1950"])
+        command.extend(["-c", str(self.config_file.resolve()), "-X", "-x", "-I", "OpenGFX",
+                        "-d", "net=1,misc=2" if selected else "net=1"])
+        return command
+
     def start(self, save=None):
-        if save or self.initial_save:
-            return super().start(save or self.initial_save)
+        if self.process is not None:
+            raise RuntimeError("World already running")
+        selected = save or self.initial_save
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith("OPENTTD_INTEGRATION_") and key != "OPENTTD_RENDERER_IMAGE_DIR"}
         environment.update({"XDG_DATA_HOME": str(self.data), "XDG_CONFIG_HOME": str(self.config),
@@ -402,18 +435,18 @@ class FreshWorld(LiveWorld):
         if os.environ.get("OPENTTD_TEST_LIBRARY_PATH"):
             environment["LD_LIBRARY_PATH"] = os.environ["OPENTTD_TEST_LIBRARY_PATH"] + ":" + environment.get("LD_LIBRARY_PATH", "")
         self.log = (self.directory / "engine.log").open("ab", buffering=0)
-        self.process = subprocess.Popen([str(self.binary), "-D", f"127.0.0.1:{self.port}",
-            "-G", str(self.seed), "-g", "-t", "1950", "-x", "-I", "OpenGFX", "-d", "net=1"],
+        self.process = subprocess.Popen(self.command(save),
             cwd=self.directory, env=environment, stdin=subprocess.PIPE, stdout=self.log,
             stderr=subprocess.STDOUT, start_new_session=True)
-        deadline = time.monotonic() + 90
+        deadline = time.monotonic() + (25 if selected else 90)
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
                 raise RPCError(f"Fresh engine exited: {self.log_tail()}")
             try:
                 hello = self.rpc("hello")
                 self.instance = hello["engine_instance_id"]
-                if self.rpc("checkpoint.status").get("result", {}).get("load_verified"):
+                status = self.rpc("checkpoint.status")
+                if status.get("status") == "completed" and status.get("result", {}).get("load_verified"):
                     self.console("unpause")
                     return
             except (OSError, ValueError, KeyError):
@@ -436,6 +469,44 @@ class Group:
         self.database = self.world.directory / "world.sqlite3"
         self.routes = []
         self.handles = []
+        self.visual_join_policy = []
+
+    @staticmethod
+    def renderer_command(binary, native_port, number, config_file):
+        return [str(binary), "-v", "framebuffer", "-s", "null", "-m", "null", "-r", "1280x720",
+                "-n", f"127.0.0.1:{native_port}#{number+1}", "-c", str(config_file.resolve()),
+                "-X", "-x", "-I", "OpenGFX", "-d", "net=1"]
+
+    def prepare_visual_access(self):
+        """Use each visual company's ordinary text session before its worker joins."""
+        path = self.args.output / "visual-join-policy-setup.json"
+        for number in range(len(self.visual)):
+            client = self.http[number]
+            before = client.observe("company.access").get("join_policy")
+            if before not in ("any", "listed"):
+                raise RPCError(f"Company {number} join policy is unavailable")
+            record = {"company_id": number, "before": before, "action_request_id": None, "after": None}
+            self.visual_join_policy.append(record)
+            write_json(path, {"phase": "bootstrap", "companies": self.visual_join_policy})
+            if before == "listed":
+                request_id = uuid.uuid4().hex
+                record["action_request_id"] = request_id
+                write_json(path, {"phase": "bootstrap", "companies": self.visual_join_policy})
+                result = client.request("POST", "/v1/actions", {
+                    "request_id": request_id, "action": {"name": "company.join_policy.set", "parameters": {"policy": "any"}}})
+                deadline = time.monotonic() + 30
+                while result["status"] not in TERMINAL:
+                    if time.monotonic() >= deadline:
+                        raise RPCError(f"Company {number} join policy action did not complete")
+                    time.sleep(.025)
+                    result = client.request("GET", "/v1/actions/" + request_id)
+                if result["status"] != "completed" or not result.get("result", {}).get("success"):
+                    raise RPCError(f"Company {number} join policy action failed: {result['status']}")
+            after = client.observe("company.access").get("join_policy")
+            if after != "any":
+                raise RPCError(f"Company {number} join policy did not become any")
+            record["after"] = after
+            write_json(path, {"phase": "bootstrap", "companies": self.visual_join_policy})
 
     def spawn(self, name, command, environment=None, cwd=None):
         log = (self.world.directory / (name + ".log")).open("ab", buffering=0)
@@ -488,6 +559,7 @@ class Group:
             self.wait(lambda company=company: self.world.rpc("company.ensure", company_id=company,
                 create=not(self.index == 0 and self.args.initial_save)).get("status") == "completed")
         self.wait(lambda: self.http[0].request("GET", "/v1/capabilities").get("engine_connected"))
+        self.prepare_visual_access()
         for number in range(len(self.visual)):
             directory = self.world.directory / f"renderer{number}"
             environment = {key: value for key, value in os.environ.items()
@@ -499,9 +571,8 @@ class Group:
                 "OPENTTD_RENDERER_IMAGE_DIR": str(directory / "images")})
             if os.environ.get("OPENTTD_TEST_LIBRARY_PATH"):
                 environment["LD_LIBRARY_PATH"] = os.environ["OPENTTD_TEST_LIBRARY_PATH"] + ":" + environment.get("LD_LIBRARY_PATH", "")
-            child = self.spawn(f"renderer{number}", [str(self.args.binary), "-v", "framebuffer", "-s", "null",
-                "-m", "null", "-r", "1280x720", "-n", f"127.0.0.1:{self.world.port}#{number+1}",
-                "-x", "-I", "OpenGFX", "-d", "net=1"], environment, directory)
+            child = self.spawn(f"renderer{number}", self.renderer_command(self.args.binary, self.world.port,
+                number, directory / "config/openttd/openttd.cfg"), environment, directory)
             self.renderers.append(child)
             self.wait(lambda number=number: self.visual[number].request("POST", "/v1/view/images", {}), timeout=60)
         dimensions = self.http[0].observe("map.region", {"x": 1, "y": 1, "width": 1, "height": 1})
@@ -1234,8 +1305,8 @@ def main(argv=None):
         "driver_sha256": file_sha256(Path(__file__)),
         "backend_runtime_sha256": {str(path.relative_to(ROOT)): file_sha256(path)
             for path in sorted([*ROOT.glob("backend/*.py"), *ROOT.glob("backend/schemas/*.json")])},
-        "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-        "git_status": subprocess.check_output(["git", "status", "--short"], cwd=ROOT, text=True),
+        **source_revision_metadata(ROOT),
+        **runtime_manifest_metadata(ROOT),
         "tick_seconds": TICK_SECONDS, "tick_measurement_format": TICK_MEASUREMENT_FORMAT,
         "transport": "real loopback HTTP/1.1 ASGI", "map": [512, 512],
         "view_credentials": 4, "browser_connections": args.viewers, "visual_agents": 4,

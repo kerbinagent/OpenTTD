@@ -1,7 +1,9 @@
 """Pure speed-attribution and audit-compatibility checks; no native world needed."""
 
 import copy
+import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -203,6 +205,125 @@ class AuditCompatibilityTests(unittest.TestCase):
             self.assertFalse(result["checks"]["tick_measurement_proof"])
             self.assertFalse(result["target_pass"])
             self.assertEqual(len(result["tick_bracket_diagnostics"]["windows"]["0"]), 4)
+
+
+class FrozenStartupTests(unittest.TestCase):
+    def test_frozen_root_records_no_fake_git_revision(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(load_world.subprocess, "check_output") as git:
+                result = load_world.source_revision_metadata(root)
+            git.assert_not_called()
+            self.assertIsNone(result["git_head"])
+            self.assertIsNone(result["git_status"])
+            self.assertEqual(result["runtime_root"], str(root))
+            self.assertEqual(result["git_metadata_reason"], "runtime_root_has_no_git_metadata")
+
+    def test_runtime_manifest_fingerprint_is_explicit_or_unavailable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertEqual(load_world.runtime_manifest_metadata(root),
+                             {"runtime_manifest_path": None, "runtime_manifest_sha256": None})
+            manifest = root / "benchmark-runtime-manifest.json"
+            manifest.write_bytes(b'{"frozen":true}\n')
+            self.assertEqual(load_world.runtime_manifest_metadata(root),
+                             {"runtime_manifest_path": str(manifest),
+                              "runtime_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest()})
+
+    def test_saved_and_generated_world_commands_pin_private_paths(self):
+        world = object.__new__(load_world.FreshWorld)
+        world.binary = Path("/frozen/openttd")
+        world.port = 38979
+        world.seed = 20261017
+        world.initial_save = Path("/fixtures/initial.sav")
+        world.config_file = Path("/tmp/private/config/openttd/openttd.cfg")
+        saved = world.command()
+        self.assertEqual(saved[:5], ["/frozen/openttd", "-D", "127.0.0.1:38979", "-g", "/fixtures/initial.sav"])
+        self.assertEqual(saved[saved.index("-c")+1], str(world.config_file.resolve()))
+        self.assertTrue({"-X", "-x", "-I"} <= set(saved))
+        self.assertNotIn("-G", saved)
+        override = world.command(save=Path("/fixtures/override.sav"))
+        self.assertEqual(override[override.index("-g")+1], "/fixtures/override.sav")
+        world.initial_save = None
+        generated = world.command()
+        self.assertEqual(generated[generated.index("-G")+1], "20261017")
+        self.assertEqual(generated[generated.index("-t")+1], "1950")
+        self.assertIn("-g", generated)
+        self.assertIn("-X", generated)
+        self.assertEqual(generated[generated.index("-c")+1], str(world.config_file.resolve()))
+        renderer = load_world.Group.renderer_command(world.binary, world.port, 2, world.config_file)
+        self.assertEqual(renderer[renderer.index("-n")+1], "127.0.0.1:38979#3")
+        self.assertEqual(renderer[renderer.index("-c")+1], str(world.config_file.resolve()))
+        self.assertTrue({"-X", "-x", "-I"} <= set(renderer))
+
+    def test_saved_start_uses_own_ready_loop_and_scrubs_inherited_renderer_context(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            world = object.__new__(load_world.FreshWorld)
+            world.binary = Path("/frozen/openttd")
+            world.port = 38979
+            world.seed = 20261017
+            world.initial_save = base / "initial.sav"
+            world.directory = base
+            world.data, world.config, world.state = base / "data", base / "config", base / "state"
+            world.config_file = world.config / "openttd/openttd.cfg"
+            world.socket_path = base / "world.sock"
+            world.world_id, world.epoch, world.instance = "world", "epoch", None
+            world.process = None
+            calls, console = [], []
+            world.rpc = lambda kind: (calls.append(kind) or ({"engine_instance_id": "instance"} if kind == "hello"
+                else {"status": "completed", "result": {"load_verified": True}}))
+            world.console = console.append
+            child = SimpleNamespace(poll=lambda: None)
+            with mock.patch.object(load_world.subprocess, "Popen", return_value=child) as spawn, mock.patch.dict(
+                    os.environ, {"OPENTTD_INTEGRATION_ROLE": "renderer", "OPENTTD_RENDERER_IMAGE_DIR": "/foreign"}):
+                world.start()
+            world.log.close()
+            self.assertEqual(world.instance, "instance")
+            self.assertEqual(calls, ["hello", "checkpoint.status"])
+            self.assertEqual(console, ["unpause"])
+            self.assertEqual(spawn.call_args.args[0], world.command())
+            environment = spawn.call_args.kwargs["env"]
+            self.assertNotIn("OPENTTD_INTEGRATION_ROLE", environment)
+            self.assertNotIn("OPENTTD_RENDERER_IMAGE_DIR", environment)
+            self.assertEqual(environment["OPENTTD_INTEGRATION_WORLD_ID"], "world")
+            self.assertEqual(environment["XDG_CONFIG_HOME"], str(world.config))
+
+    def test_visual_policy_setup_only_mutates_listed_companies_and_records_request_ids(self):
+        class Client:
+            def __init__(self, policies):
+                self.policies, self.calls = list(policies), []
+
+            def observe(self, name):
+                self.calls.append(("observe", name))
+                return {"join_policy": self.policies.pop(0)}
+
+            def request(self, method, path, body=None):
+                self.calls.append((method, path, body))
+                return {"status": "accepted"} if method == "POST" else {
+                    "status": "completed", "result": {"success": True}}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            group = object.__new__(load_world.Group)
+            group.args = SimpleNamespace(output=Path(temporary))
+            group.visual = [object(), object()]
+            group.http = [Client(["any", "any"]), Client(["listed", "any"])]
+            group.visual_join_policy = []
+            with mock.patch.object(load_world.time, "sleep"):
+                group.prepare_visual_access()
+            evidence = json.loads((Path(temporary) / "visual-join-policy-setup.json").read_text())
+            self.assertEqual(evidence["phase"], "bootstrap")
+            self.assertIsNone(evidence["companies"][0]["action_request_id"])
+            self.assertEqual(evidence["companies"][0]["after"], "any")
+            request_id = evidence["companies"][1]["action_request_id"]
+            self.assertEqual(len(request_id), 32)
+            self.assertEqual(evidence["companies"][1]["after"], "any")
+            self.assertEqual([call[0] for call in group.http[0].calls], ["observe", "observe"])
+            self.assertEqual([call[0] for call in group.http[1].calls], ["observe", "POST", "GET", "observe"])
+            self.assertEqual(group.http[1].calls[1][2]["action"],
+                             {"name": "company.join_policy.set", "parameters": {"policy": "any"}})
+            self.assertEqual(group.http[1].calls[2][1], "/v1/actions/" + request_id)
+            self.assertNotIn("token", (Path(temporary) / "visual-join-policy-setup.json").read_text())
 
 
 if __name__ == "__main__":
