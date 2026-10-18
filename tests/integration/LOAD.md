@@ -221,3 +221,49 @@ Session evidence is retained in `/tmp/openttd-load-api64-target`, including
 `measurement-addendum.json` and the separately labelled thread samples. Its
 closed raw `samples.jsonl` SHA-256 is
 `8f1f8fc727367b322949ba3ced23e289b85188fb8534f200ad45c8aecb1fb7fb`.
+
+## Frozen runtime04 result, 2026-10-18
+
+A separate run on native SHA-256
+`4e26eb857becb40324cd72a1b00ffc1812c5490e743c5655de85c452e9e8eb07`
+and its frozen runtime04 backend/driver measured 03:27:47–03:57:47 UTC
+(1,800.000141 seconds). It used the normally constructed saved fixture:
+500 active buses in eight companies, 50 browser-protocol viewers and four
+visual clients sharing four company views. Three independent one-bus sentinel
+worlds brought the total to four engine/backend groups.
+
+| Recorded measurement | Result |
+| --- | --- |
+| Declared harness verdict | `TARGET_PASS`; all 18 unchanged checks pass |
+| Gameplay admissions and ledger completions | 1,800 / 1,800; p95 ACK 73.3 ms |
+| Chat admissions and exact viewer delivery pairs | 1,800; 90,000 / 90,000; p95 delivery 199.3 ms |
+| Measured steady HTTP/client errors; sampling gaps | 0; 0 |
+| Active heads | 500 throughout all 360 steady samples |
+| Primary minimum completed five-second speed ratio | 0.99465 |
+| Sentinel minimum completed five-second speed ratios | 0.99481 / 0.98243 / 0.97801 |
+| Conservative whole-interval speed lower bound | 0.99168 in each world |
+| Sampled simultaneous SSE connections | Minimum 37; below 50 in 8 of 360 steady samples |
+
+The viewer check proves 50 distinct clients and every accepted message/viewer
+pair, not 50 simultaneous streams throughout. Tick brackets were valid, with
+1,439 corroborated windows and one short, timing-inconclusive edge; unobserved
+boundary minima remain unproven. Native queue depth and actual send/slot
+saturation remain uninstrumented. The separate unread-PNG fault offered
+24,912,768 response bytes and observed continued action/API/tick progress;
+it does not prove saturated backpressure. Parked-frame freshness and the
+four-renderer scope above still apply.
+
+The frozen benchmark manifest is
+`/tmp/openttd-load-final-runtime-kyvwldir/benchmark-runtime-manifest.json`
+(SHA-256 `0dbb62ca4c2c632ee5dbeb49857ee91f348609735b235f7f6dea81cb1a7cb073`).
+Raw results and the authoritative audit are in
+`/tmp/openttd-load-runtime04-rpcbrackets-38979-20261018`.
+Independent review verified unchanged frozen inputs and preserved historical
+evidence; the final attestation is
+`/tmp/openttd-load-runtime04-final-attestation.json`
+(SHA-256 `671c2c3cc978345002a1c4540aed68e1b192e78d3f4aa35d4162fb1f6ac9866c`).
+Concurrent Luna, permanent-world and private browser-QA activity is recorded
+separately; this is no isolated comparison or explanation of the historical
+failed windows. Those failures retain their original verdicts. The benchmark
+used its earlier frozen frontend assets and protocol clients; it does not
+validate the later `c144f07853` playable browser UI or close the Luna gameplay gate.
