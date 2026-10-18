@@ -166,8 +166,7 @@ class Service:
         elif principal.kind == "agent" and principal.run_id in self.store.agent_join_claimed_runs(principal.world_id):
             # Historical public claims also retain their original incarnation.
             # An old claim that never acquired a native binding fails closed.
-            DynamicAgentAdmission._assert_owner(principal, self, self._hello(principal, refresh=True),
-                                                require_registration=False)
+            DynamicAgentAdmission._assert_owner(principal, self, self._hello(principal, refresh=True))
         return principal
 
     def _envelope(self, rpc_type, principal=None, **fields):
@@ -181,6 +180,8 @@ class Service:
         return envelope
 
     def _rpc(self, rpc_type, principal=None, **fields):
+        if self.engine is None:
+            raise ServiceError("engine_unavailable", status=503)
         envelope = self._envelope(rpc_type, principal, **fields)
         reply = self.engine.call(envelope)
         if not isinstance(reply, dict):

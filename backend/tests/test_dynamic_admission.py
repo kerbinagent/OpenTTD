@@ -869,10 +869,14 @@ class DynamicAdmissionTests(unittest.TestCase):
             "text", principal, hashlib.sha256(token.encode()).hexdigest(), "boot")
         return token, principal
 
-    def test_claimed_legacy_owner_is_verified_without_admission_or_registration_capability(self):
+    def test_claimed_legacy_owner_is_verified_without_admission_and_requires_native_support(self):
         token, principal = self.legacy_claim(bound=True)
         self.service.admission = None
         self.engine.registration_capability = False
+        self.assertEqual(self.assert_code("join_not_ready", lambda:
+            self.service.handle("GET", "/v1/me", token)).status, 503)
+        self.assertEqual(self.engine.count("session.bind"), 0)
+        self.engine.registration_capability = True
         _, me = self.service.handle("GET", "/v1/me", token)
         expected = {"identity_id": principal.identity_id, "world_id": "world", "company_id": 2,
                     "run_id": principal.run_id, "mode": "text", "kind": "agent",
@@ -907,6 +911,12 @@ class DynamicAdmissionTests(unittest.TestCase):
         self.assertEqual(self.store.authenticate(token), principal)
         self.assertEqual(self.engine.count("company.register"), 0)
         self.assertEqual(self.engine.count("action.submit"), 0)
+
+    def test_claimed_owner_with_no_native_engine_fails_unavailable(self):
+        token, _ = self.legacy_claim(bound=True)
+        self.service.engine = None
+        self.assertEqual(self.assert_code("engine_unavailable", lambda:
+            self.service.handle("GET", "/v1/me", token)).status, 503)
 
     def test_claimed_legacy_without_native_anchor_fails_closed_without_implicit_binding(self):
         token, principal = self.legacy_claim(bound=False)

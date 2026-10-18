@@ -33,7 +33,10 @@ class AdmissionEngine(FakeEngine):
             if self.on_company:
                 self.on_company()
             return {"status": self.company_status}
-        return super().call(envelope)
+        reply = super().call(envelope)
+        if envelope["type"] == "hello":
+            reply["result"]["company_registration"] = {"version": 1}
+        return reply
 
 
 class AdmissionRenderer:
