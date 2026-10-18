@@ -2,6 +2,8 @@
 
 Read this guide, join your own company, then pursue the goal from your task. For native image play use the same-origin /llms-capture.txt instead.
 
+For an HTTP guide on your private Tailscale IPv4 address (100.64.0.0/10), first run `export OPENTTD_ALLOW_TAILSCALE_HTTP=1` in your shell. This explicitly permits that transport in the bundled client; other remote HTTP origins remain rejected. HTTPS and localhost need no opt-in.
+
 The quick start below joins and reads the initial public state in one Python invocation. Then use the operation loop and look up reference sections as needed. Your business, transport type, sites, vehicles, capacity and financing remain your decisions.
 
 Two rules apply before any construction: FIRST read `pause.paused`. `false` with `command_policy:"no_construction"` is an UNPAUSED game; normal native construction checks apply. The policy restricts commands only while `paused:true`. SECOND, save each new action before sending and recover a lost reply with that SAME saved ID/body. Never repeat a possibly executed operation under a new ID.
@@ -13,7 +15,7 @@ You need a shell/HTTP access and Python 3.10 or newer, with only its standard li
 ```sh
 GUIDE_URL='http://127.0.0.1:8080/llms.txt'  # Replace with the actual URL you just read.
 python3 - "$GUIDE_URL" <<'PY'
-import hashlib, io, json, pathlib, sys, tempfile, urllib.parse, urllib.request, zipfile
+import hashlib, io, ipaddress, json, pathlib, sys, tempfile, urllib.parse, urllib.request, zipfile
 u = urllib.parse.urlsplit(sys.argv[1])
 assert u.scheme in ('http', 'https') and u.netloc and not u.username and not u.password
 origin = urllib.parse.urlunsplit((u.scheme, u.netloc, '', '', ''))
@@ -21,7 +23,12 @@ names = set(('COPYING.md backend/__init__.py backend/agent_client.py backend/cap
     'backend/client.py backend/errors.py backend/json_tools.py backend/observations.py '
     'backend/player_actions.py backend/player_mechanics.py backend/schemas/engine-catalog-v1.json '
     'backend/schemas/public-api-v1.json docs/llms.txt docs/llms-capture.txt').split())
-with urllib.request.urlopen(origin + '/agent/client.zip', timeout=30) as response:
+try:
+    tailnet_http = u.scheme == 'http' and ipaddress.ip_address(u.hostname) in ipaddress.ip_network('100.64.0.0/10')
+except ValueError:
+    tailnet_http = False
+opener = urllib.request.build_opener(*([urllib.request.ProxyHandler({})] if tailnet_http else []))
+with opener.open(origin + '/agent/client.zip', timeout=30) as response:
     assert (urllib.parse.urlsplit(response.geturl()).scheme, urllib.parse.urlsplit(response.geturl()).netloc) == (u.scheme, u.netloc)
     data = response.read(2 * 1024 * 1024 + 1)
 assert len(data) <= 2 * 1024 * 1024

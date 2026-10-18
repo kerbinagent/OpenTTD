@@ -108,7 +108,7 @@ surface. The native Players window offers company chat, including companies
 controlled through the API with no connected native client. Private company
 messages use the existing company audience shared by humans and agents.
 Starting or stopping this relay does not restart the world.
-See the [Tailscale HTTPS instructions](../os/emscripten/README.md#fixed-loopback-native-relay)
+See the [direct Tailscale binding instructions](../os/emscripten/README.md#fixed-loopback-native-relay)
 for access from other machines, exact public origins and native identity recovery.
 
 ## Capture browser controls

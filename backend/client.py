@@ -7,6 +7,7 @@ interprets message bodies as instructions or sends replies automatically.
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import re
 import socket
@@ -17,7 +18,7 @@ import uuid
 from typing import Callable, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .observations import ObservationImage, validate_request
 
@@ -67,14 +68,21 @@ class BackendClient:
             parsed.path not in ("", "/") or parsed.query or parsed.fragment or
             parsed.username is not None or parsed.password is not None):
             raise ValueError("Base URL must be an HTTP(S) origin")
+        tailnet_http = False
         if parsed.scheme == "http" and parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
-            raise ValueError("Remote credential transport requires HTTPS")
+            try:
+                tailnet = ipaddress.ip_address(parsed.hostname) in ipaddress.ip_network("100.64.0.0/10")
+            except ValueError:
+                tailnet = False
+            if not tailnet or os.environ.get("OPENTTD_ALLOW_TAILSCALE_HTTP") != "1":
+                raise ValueError("Remote credential transport requires HTTPS; Tailscale IPv4 HTTP requires OPENTTD_ALLOW_TAILSCALE_HTTP=1")
+            tailnet_http = True
         if not token or any(char.isspace() for char in token):
             raise ValueError("Invalid bearer credential")
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
-        self._opener = build_opener(_NoRedirect())
+        self._opener = build_opener(_NoRedirect(), *([ProxyHandler({})] if tailnet_http else []))
         self._observation_capability = None
         self.on_http_attempt = None
 

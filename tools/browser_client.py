@@ -3,14 +3,20 @@
 import argparse
 import asyncio
 import contextlib
+import ipaddress
 import json
 import os
 import re
 from pathlib import Path
 import stat
+import sys
 from urllib.parse import urlsplit
 
-from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, WSMsgType, web
+from aiohttp import ClientError, ClientSession, ClientTimeout, DummyCookieJar, TCPConnector, WSMsgType, web
+from yarl import URL
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from backend.agent_assets import build_agent_assets
 
 ASSETS = {'openttd.html', 'openttd.js', 'openttd.wasm', 'openttd.data'}
 CLIENT_LIMIT = 4
@@ -20,20 +26,36 @@ WRITE_TIMEOUT = 10
 METADATA_LIMIT = 64 * 1024
 METADATA_TIMEOUT = 3
 METADATA_SESSION = web.AppKey('metadata_session', ClientSession)
+API_SESSION = web.AppKey('api_session', ClientSession)
+API_LIMIT = 16
+API_BODY_LIMIT = 64 * 1024
+API_RESPONSE_LIMIT = 16 * 1024 * 1024
+API_REQUEST_HEADERS = ('Authorization', 'Content-Type', 'Accept', 'Last-Event-ID', 'X-OpenTTD-Attempt-Id')
+API_RESPONSE_HEADERS = ('Content-Type',) + tuple('X-OpenTTD-' + name for name in (
+    'Observation-Id', 'Image-Id', 'Observation-Generation', 'Capture-Kind', 'Image-Width',
+    'Image-Height', 'Causal-State', 'Image-Reused', 'Image-Age-Ms', 'Image-Purpose'))
 ENTRY_ROOT = Path(__file__).resolve().parents[1] / 'os' / 'emscripten'
 ENTRY_ASSETS = {'browser-entry.js': 'application/javascript', 'browser-entry.css': 'text/css'}
 
 
-def https_origin(value):
+def bind_address(value):
+    address = ipaddress.ip_address(value)
+    if str(address) != value or address.version != 4 or not (value == '127.0.0.1' or address in ipaddress.ip_network('100.64.0.0/10')):
+        raise ValueError('bind an exact loopback or Tailscale IPv4 address')
+    return value
+
+
+def https_origin(value, allow_http_host=None):
     parsed = urlsplit(value)
-    if (parsed.scheme != 'https' or not parsed.hostname or parsed.username is not None
+    if ((parsed.scheme != 'https' and not (parsed.scheme == 'http' and parsed.hostname == allow_http_host))
+            or not parsed.hostname or parsed.username is not None
             or parsed.password is not None or parsed.path or parsed.query or parsed.fragment
             or any(c.isspace() for c in value) or parsed.hostname != parsed.hostname.lower()
             or len(parsed.hostname) > 253
             or not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in parsed.hostname.split('.'))
-            or (parsed.port is not None and (not 1 <= parsed.port <= 65535 or parsed.port == 443))
+            or (parsed.port is not None and (not 1 <= parsed.port <= 65535 or parsed.port == (443 if parsed.scheme == 'https' else 80)))
             or parsed.netloc != parsed.hostname + (f':{parsed.port}' if parsed.port is not None else '')):
-        raise ValueError('public origin must be an exact HTTPS origin without a path')
+        raise ValueError('public origin must be exact HTTPS or HTTP on the configured bind address')
     return value
 
 
@@ -116,7 +138,7 @@ def model_roster(payload):
 
 
 def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, metadata_token_file=None,
-               *, world_id=None, api_port=None, public_origin=None, public_api_origin=None):
+               *, world_id=None, api_port=None, public_origin=None, public_api_origin=None, bind_host='127.0.0.1'):
     if (metadata_port is None) != (metadata_token_file is None):
         raise ValueError('metadata port and token file must be provided together')
     metadata_token = read_metadata_token(metadata_token_file) if metadata_port is not None else None
@@ -124,10 +146,14 @@ def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, meta
                                  or not all(c.isalnum() or c in '-_.' for c in world_id)):
         raise ValueError('world identity must be a bounded identifier')
     entry_assets = {name: (ENTRY_ROOT / name).read_bytes() for name in ENTRY_ASSETS}
+    bind_address(bind_host)
+    if public_origin is None and not ipaddress.ip_address(bind_host).is_loopback:
+        public_origin = f'http://{bind_host}:{port}'
     if public_origin is not None:
-        https_origin(public_origin)
+        https_origin(public_origin, bind_host)
     if public_api_origin is not None:
-        https_origin(public_api_origin)
+        https_origin(public_api_origin, bind_host)
+    agent_assets = build_agent_assets() if api_port is not None else {}
     root = Path(asset_dir).resolve(strict=True)
     if not root.is_dir():
         raise ValueError('asset directory required')
@@ -137,17 +163,27 @@ def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, meta
         if path.is_symlink() or not path.is_file():
             raise ValueError(f'missing or symlinked public build asset: {name}')
     hosts = {f'127.0.0.1:{port}', f'localhost:{port}'}
+    hosts.add(f'{bind_host}:{port}')
     origins = {'http://' + host for host in hosts}
     if public_origin is not None:
         hosts.add(urlsplit(public_origin).netloc)
         origins.add(public_origin)
     active = set()
+    api_active = set()
 
     @web.middleware
     async def guard(request, handler):
         if request.headers.getall('Host', []) not in ([host] for host in hosts):
             raise web.HTTPForbidden()
+        if api_port is not None and request.raw_path.startswith('/v1/'):
+            if (len(request.raw_path) > 8192 or '#' in request.raw_path or '%' in request.raw_path.split('?', 1)[0]
+                    or any(ord(c) < 32 or ord(c) == 127 for c in request.raw_path)):
+                raise web.HTTPBadRequest()
+            if request.headers.getall('Origin', []) and request.headers.getall('Origin', []) not in ([origin] for origin in origins):
+                raise web.HTTPForbidden()
+            return await handler(request)
         routes = {'/', '/browser-config.js', '/native'} | {'/' + name for name in ASSETS | ENTRY_ASSETS.keys()}
+        routes.update(agent_assets)
         if metadata_port is not None:
             routes.add('/model-roster')
         if request.query_string or '%' in request.raw_path or request.path not in routes:
@@ -162,12 +198,15 @@ def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, meta
             raise web.HTTPFound('/openttd.html')
         if request.path == '/browser-config.js':
             host = request.host.split(':')[0]
-            local_api = f'http://{host}:{api_port}' if api_port is not None and request.host in {f'127.0.0.1:{port}', f'localhost:{port}'} else None
+            local_api = 'http://' + request.host if api_port is not None and request.host in {f'127.0.0.1:{port}', f'localhost:{port}', f'{bind_host}:{port}'} else None
             config = {'nativePort': native_port, 'websocketPath': '/native', 'modelRoster': metadata_port is not None,
                       'worldId': world_id, 'publicOrigin': public_origin,
                       'apiOrigin': public_api_origin or local_api}
             return web.Response(text='window.OPENTTD_BROWSER_RELAY=' + json.dumps(config) + ';\n', content_type='application/javascript')
         name = request.path[1:]
+        if request.path in agent_assets:
+            body, content_type = agent_assets[request.path]
+            return web.Response(body=body, headers={'Content-Type': content_type})
         if name in entry_assets:
             return web.Response(body=entry_assets[name], content_type=ENTRY_ASSETS[name])
         # Open without following a replacement symlink; retain the descriptor
@@ -253,18 +292,73 @@ def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, meta
             app[METADATA_SESSION] = session
             yield
 
+    async def api_session(app):
+        async with ClientSession(timeout=ClientTimeout(total=None, sock_connect=3, sock_read=60),
+                                 connector=TCPConnector(limit=API_LIMIT), cookie_jar=DummyCookieJar(), trust_env=False) as session:
+            app[API_SESSION] = session
+            yield
+
+    async def api(request):
+        if len(api_active) >= API_LIMIT:
+            raise web.HTTPServiceUnavailable()
+        ticket = object()
+        api_active.add(ticket)
+        response = None
+        try:
+            headers = {}
+            for name in API_REQUEST_HEADERS:
+                values = request.headers.getall(name, [])
+                if len(values) > 1:
+                    raise web.HTTPBadRequest()
+                if values:
+                    headers[name] = values[0]
+            body = await asyncio.wait_for(request.read(), 10)
+            if len(body) > API_BODY_LIMIT:
+                raise web.HTTPRequestEntityTooLarge(max_size=API_BODY_LIMIT, actual_size=len(body))
+            target = URL(f'http://127.0.0.1:{api_port}' + request.raw_path, encoded=True)
+            async with app[API_SESSION].request(request.method, target, data=body, headers=headers, allow_redirects=False) as upstream:
+                public_headers = {}
+                for name in API_RESPONSE_HEADERS:
+                    values = upstream.headers.getall(name, [])
+                    if len(values) > 1:
+                        raise web.HTTPBadGateway()
+                    if values:
+                        public_headers[name] = values[0]
+                response = web.StreamResponse(status=upstream.status, headers=public_headers)
+                await response.prepare(request)
+                size = 0
+                events = upstream.content_type == 'text/event-stream'
+                async for chunk in upstream.content.iter_chunked(CHUNK_SIZE):
+                    size += len(chunk)
+                    if not events and size > API_RESPONSE_LIMIT:
+                        raise ValueError('API response exceeds its bound')
+                    await asyncio.wait_for(response.write(chunk), WRITE_TIMEOUT)
+                await asyncio.wait_for(response.write_eof(), WRITE_TIMEOUT)
+                return response
+        except (ClientError, OSError, TimeoutError, ValueError):
+            if response is not None and response.prepared:
+                if request.transport is not None:
+                    request.transport.close()
+                return response
+            raise web.HTTPBadGateway()
+        finally:
+            api_active.discard(ticket)
+
     async def headers(request, response):
         response.headers.update({'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer'})
 
     async def shutdown(app):
         await asyncio.gather(*(ws.close(code=1001, message=b'relay stopping') for ws in tuple(active)))
 
-    app = web.Application(middlewares=[guard], client_max_size=1024)
+    app = web.Application(middlewares=[guard], client_max_size=API_BODY_LIMIT + 1)
     app.on_response_prepare.append(headers)
     app.on_shutdown.append(shutdown)
     if metadata_port is not None:
         app.cleanup_ctx.append(metadata_session)
         app.router.add_route('*', '/model-roster', metadata)
+    if api_port is not None:
+        app.cleanup_ctx.append(api_session)
+        app.router.add_route('*', '/v1/{tail:.*}', api)
     app.router.add_route('*', '/native', native)
     app.router.add_route('*', '/{path:.*}', serve)
     return app
@@ -274,20 +368,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('asset_dir', type=Path, help='public isolated WASM build directory')
     parser.add_argument('--port', type=port_number, default=18087)
+    parser.add_argument('--host', type=bind_address, default='127.0.0.1', help='exact loopback or Tailscale IPv4 bind address')
     parser.add_argument('--native-port', type=port_number, default=3979)
     parser.add_argument('--metadata-port', type=port_number, help='fixed loopback API port for public model labels')
     parser.add_argument('--metadata-token-file', type=Path, help='server-held API credential; requires --metadata-port')
     parser.add_argument('--world-id', help='stable world epoch for remembered company selection; change on a new world')
-    parser.add_argument('--api-port', type=port_number, help='fixed loopback public agent API port for copyable prompts')
-    parser.add_argument('--public-origin', type=https_origin, help='exact HTTPS browser origin of a trusted tailnet proxy')
-    parser.add_argument('--public-api-origin', type=https_origin, help='exact HTTPS public guide/API origin for agent prompts')
+    parser.add_argument('--api-port', type=port_number, help='fixed loopback API; expose its authenticated routes and current public agent kit')
+    parser.add_argument('--public-origin', help='exact browser origin; HTTP is allowed on the configured bind address')
+    parser.add_argument('--public-api-origin', help='exact public guide/API origin for agent prompts; defaults to this listener')
     args = parser.parse_args()
     if (args.metadata_port is None) != (args.metadata_token_file is None):
         parser.error('--metadata-port and --metadata-token-file must be provided together')
     web.run_app(create_app(args.asset_dir, args.port, args.native_port, args.metadata_port, args.metadata_token_file,
                            world_id=args.world_id, api_port=args.api_port, public_origin=args.public_origin,
-                           public_api_origin=args.public_api_origin), host='127.0.0.1', port=args.port,
-                access_log=None, shutdown_timeout=5, max_line_size=4096, max_field_size=4096)
+                           public_api_origin=args.public_api_origin, bind_host=args.host), host=args.host, port=args.port,
+                access_log=None, shutdown_timeout=5, max_line_size=4096, max_field_size=4096, handler_cancellation=True)
 
 
 if __name__ == '__main__':

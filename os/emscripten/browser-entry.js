@@ -31,7 +31,7 @@
     else item.lines.push('[' + section + ']', line, '');
     return item.lines.join('\n');
   }
-  function prepareIdentity(fs, crypto, directory) {
+  function prepareIdentity(fs, crypto, directory, canonical) {
     function read(path) { try { return fs.readFile(path, {encoding: 'utf8'}); } catch (error) { if (error.errno !== 44) throw error; return ''; } }
     var configPath = directory + '/openttd.cfg', config = read(configPath);
     if (!config) { config = '[version]\nini_version = 8\n'; fs.writeFile(configPath, config); }
@@ -41,10 +41,36 @@
     var secretPath = modern ? directory + '/secrets.cfg' : configPath;
     var content = modern ? read(secretPath) : config;
     var secret = iniSetting(content, 'network', 'client_secret_key').value;
-    if (!/^[0-9a-fA-F]{64}$/.test(secret || '')) {
-      secret = Array.from(crypto.getRandomValues(new Uint8Array(32)), function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+    if (canonical !== undefined && !/^[0-9a-fA-F]{64}$/.test(canonical)) throw new Error('Invalid browser identity');
+    if (canonical !== undefined || !/^[0-9a-fA-F]{64}$/.test(secret || '')) {
+      secret = canonical === undefined ? Array.from(crypto.getRandomValues(new Uint8Array(32)), function(b) { return b.toString(16).padStart(2, '0'); }).join('') : canonical;
       fs.writeFile(secretPath, setIni(content, 'network', 'client_secret_key', secret));
     }
+    return secret;
+  }
+  function persistIdentity(indexedDB, candidate) {
+    return new Promise(function(resolve, reject) {
+      var open = indexedDB.open('openttd-browser-identity', 1), settled = false;
+      function fail() { settled = true; reject(new Error('Browser identity storage unavailable')); }
+      open.onerror = open.onblocked = fail;
+      open.onupgradeneeded = function() { open.result.createObjectStore('identity'); };
+      open.onsuccess = function() {
+        var db = open.result;
+        if (settled) { db.close(); return; }
+        db.onversionchange = function() { db.close(); };
+        var transaction, store, chosen;
+        try { transaction = db.transaction('identity', 'readwrite'); store = transaction.objectStore('identity'); }
+        catch (_) { db.close(); fail(); return; }
+        transaction.onabort = transaction.onerror = function() { db.close(); fail(); };
+        transaction.oncomplete = function() { db.close(); resolve(chosen); };
+        var get = store.get('native-key');
+        get.onsuccess = function() {
+          chosen = get.result === undefined ? candidate : get.result;
+          if (typeof chosen !== 'string' || !/^[0-9a-fA-F]{64}$/.test(chosen)) { transaction.abort(); return; }
+          if (get.result === undefined) store.add(chosen, 'native-key');
+        };
+      };
+    });
   }
   function cookieName(port) { return 'openttd_company_' + port; }
   function remembered(cookie, port, world) {
@@ -74,12 +100,10 @@
     root.openttd_browser_storage_failed = function() { fail('Your browser could not save the game identity. Allow site storage and reload to connect safely.'); };
     async function start(mode, company) {
       if (started) return;
-      if (!navigator.locks) { show('This browser needs Web Locks support to keep your company identity safe. Use a current browser on localhost.'); return; }
       started = true;
       show('Connecting…');
       try {
-        await navigator.locks.request('openttd-native-client', {ifAvailable: true}, async function(lock) {
-          if (!lock) { started = false; show('A game is already open in another tab. Close that tab, then try again.'); return; }
+        async function launch() {
           if (mode === 'human' && location.hash === '#choose') history.replaceState(null, '', location.pathname + location.search);
           Object.defineProperty(root, 'OPENTTD_BROWSER_SESSION', {value: Object.freeze({readOnly: mode === 'observe'}), configurable: false, writable: false});
           config.company = company;
@@ -100,7 +124,15 @@
           label.textContent = mode === 'observe' ? 'Observer · read only' : company === 254 ? 'Creating your company…' : 'Connecting to your company…';
           load();
           await new Promise(function() {}); // Hold the origin lock until the page closes.
-        });
+        }
+        if (navigator.locks) {
+          await navigator.locks.request('openttd-native-client', {ifAvailable: true}, async function(lock) {
+            if (!lock) { started = false; show('A game is already open in another tab. Close that tab, then try again.'); return; }
+            await launch();
+          });
+        } else {
+          await launch();
+        }
       } catch (error) { fail('Could not start the game. Reload to try again.'); console.error(error); }
     }
     document.getElementById('choose-observe').addEventListener('click', function() { void start('observe', 255); });
@@ -118,10 +150,14 @@
     mode.addEventListener('change', updatePrompt); goal.addEventListener('input', updatePrompt);
     document.getElementById('choose-agent').addEventListener('click', function() { agent.hidden = false; human.hidden = true; updatePrompt(); show(''); });
     document.getElementById('copy-agent-prompt').addEventListener('click', async function() {
-      try { await navigator.clipboard.writeText(prompt.value); show('Prompt copied. Paste it into your agent harness to join the game.'); }
+      try {
+        if (navigator.clipboard) await navigator.clipboard.writeText(prompt.value);
+        else { prompt.focus(); prompt.select(); if (!document.execCommand('copy')) throw new Error('Copy unavailable'); }
+        show('Prompt copied. Paste it into your agent harness to join the game.');
+      }
       catch (_) { prompt.focus(); prompt.select(); show('Select and copy the prompt, then paste it into your agent harness.'); }
     });
     if (saved !== null && location.hash !== '#choose') void start('human', saved + 1);
   }
-  root.OpenTTDBrowser = {init: init, prepareIdentity: prepareIdentity, iniSetting: iniSetting, remembered: remembered};
+  root.OpenTTDBrowser = {init: init, prepareIdentity: prepareIdentity, persistIdentity: persistIdentity, iniSetting: iniSetting, remembered: remembered};
 })(typeof window === 'undefined' ? globalThis : window);

@@ -3,7 +3,7 @@ Module.arguments.push('-mnull', '-snull', '-vsdl');
 var browserRelay = window.OPENTTD_BROWSER_RELAY;
 var localRelay = browserRelay &&
     ((location.protocol === 'http:' && (location.hostname === '127.0.0.1' || location.hostname === 'localhost')) ||
-     (location.protocol === 'https:' && location.origin === browserRelay.publicOrigin)) &&
+     (location.origin === browserRelay.publicOrigin && (location.protocol === 'http:' || location.protocol === 'https:'))) &&
     Number.isInteger(browserRelay.nativePort) &&
     browserRelay.nativePort > 0 && browserRelay.nativePort <= 65535 &&
     Number.isInteger(browserRelay.company) &&
@@ -51,12 +51,17 @@ Module.preRun.push(function() {
     FS.syncfs(true, function (err) {
         if (localRelay) {
             if (err) { window.openttd_browser_storage_failed(); return; }
-            try { window.OpenTTDBrowser.prepareIdentity(FS, window.crypto, personal_dir); }
+            var candidate;
+            try { candidate = window.OpenTTDBrowser.prepareIdentity(FS, window.crypto, personal_dir); }
             catch (error) { window.openttd_browser_storage_failed(); return; }
-            FS.syncfs(false, function (saveError) {
-                if (saveError) { window.openttd_browser_storage_failed(); return; }
-                Module.removeRunDependency('syncfs');
-            });
+            window.OpenTTDBrowser.persistIdentity(window.indexedDB, candidate).then(function(key) {
+                try { window.OpenTTDBrowser.prepareIdentity(FS, window.crypto, personal_dir, key); }
+                catch (error) { window.openttd_browser_storage_failed(); return; }
+                FS.syncfs(false, function (saveError) {
+                    if (saveError) { window.openttd_browser_storage_failed(); return; }
+                    Module.removeRunDependency('syncfs');
+                });
+            }, window.openttd_browser_storage_failed);
         } else {
             Module.removeRunDependency('syncfs');
         }

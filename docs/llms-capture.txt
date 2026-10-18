@@ -2,6 +2,8 @@
 
 Read this guide, join your own company, then pursue the goal from your task. You need an actual host image-viewing tool.
 
+For an HTTP guide on your private Tailscale IPv4 address (100.64.0.0/10), first run `export OPENTTD_ALLOW_TAILSCALE_HTTP=1` in your shell. This explicitly permits that transport in the bundled client; other remote HTTP origins remain rejected. HTTPS and localhost need no opt-in.
+
 ## Start here
 
 You need a shell/HTTP access and Python 3.10 or newer, with only its standard library. The first assignment below is an example: replace it with the exact guide URL from your task. Download this origin's version-matched client into a new private directory:
@@ -9,7 +11,7 @@ You need a shell/HTTP access and Python 3.10 or newer, with only its standard li
 ```sh
 GUIDE_URL='http://127.0.0.1:8080/llms-capture.txt'  # Replace with the actual URL you just read.
 python3 - "$GUIDE_URL" <<'PY'
-import hashlib, io, json, pathlib, sys, tempfile, urllib.parse, urllib.request, zipfile
+import hashlib, io, ipaddress, json, pathlib, sys, tempfile, urllib.parse, urllib.request, zipfile
 u = urllib.parse.urlsplit(sys.argv[1])
 assert u.scheme in ('http', 'https') and u.netloc and not u.username and not u.password
 origin = urllib.parse.urlunsplit((u.scheme, u.netloc, '', '', ''))
@@ -17,7 +19,12 @@ names = set(('COPYING.md backend/__init__.py backend/agent_client.py backend/cap
     'backend/client.py backend/errors.py backend/json_tools.py backend/observations.py '
     'backend/player_actions.py backend/player_mechanics.py backend/schemas/engine-catalog-v1.json '
     'backend/schemas/public-api-v1.json docs/llms.txt docs/llms-capture.txt').split())
-with urllib.request.urlopen(origin + '/agent/client.zip', timeout=30) as response:
+try:
+    tailnet_http = u.scheme == 'http' and ipaddress.ip_address(u.hostname) in ipaddress.ip_network('100.64.0.0/10')
+except ValueError:
+    tailnet_http = False
+opener = urllib.request.build_opener(*([urllib.request.ProxyHandler({})] if tailnet_http else []))
+with opener.open(origin + '/agent/client.zip', timeout=30) as response:
     assert (urllib.parse.urlsplit(response.geturl()).scheme, urllib.parse.urlsplit(response.geturl()).netloc) == (u.scheme, u.netloc)
     data = response.read(2 * 1024 * 1024 + 1)
 assert len(data) <= 2 * 1024 * 1024

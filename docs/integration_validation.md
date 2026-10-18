@@ -380,6 +380,26 @@ match this build; the browser-only deltas are recorded separately. Tailscale
 Serve was disabled during local validation, so remote HTTPS is a separate
 deployment check rather than a claimed result of these fixtures.
 
+### Direct Tailscale HTTP follow-up (2026-10-18)
+
+The browser listener can now bind directly to an exact Tailscale IPv4 address.
+Tailscale Serve is optional. An atomic IndexedDB key record replaces the hard
+dependency on Web Locks; HTTP browsers retain company recovery, with a synchronous
+copy-button fallback. Existing native keys migrate before the game connects.
+The same listener serves an immutable current agent kit and forwards only `/v1/`
+to its fixed loopback backend, preserving selected-image metadata and SSE. Neither
+the authoritative engine nor its backend process needs a restart.
+
+Independent architecture and correctness reviews covered the identity and
+transport changes. Direct-IP Chrome checks verified an insecure browser context
+without Web Locks, successful copy, observer play, and native human company
+creation/rejoin after refresh. A separately extracted dependency-free kit joined
+text and visual companies and validated a selected native PNG through the HTTP
+edge on a disposable world. Isolated tests cover canonical-key races/errors,
+bounded proxy traffic, exact Host/Origin, metadata, streaming/disconnect cleanup,
+and narrow explicit client transport opt-in with environment proxies disabled.
+The separate 512-square world retained its engine instance throughout deployment.
+
 ## Agent model reports
 
 Commit `a9fa600fda` adds authenticated `PUT /v1/me/model` with

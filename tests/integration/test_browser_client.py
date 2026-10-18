@@ -83,6 +83,102 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
             while self.closed < count:
                 await asyncio.sleep(.01)
 
+    async def enable_api(self, handler):
+        upstream = aiohttp.web.Application()
+        upstream.router.add_route('*', '/{path:.*}', handler)
+        self.metadata_server = TestServer(upstream)
+        await self.metadata_server.start_server()
+        await self.server.close()
+        self.server = TestServer(relay.create_app(self.root, self.port, api_port=self.metadata_server.port), port=self.port)
+        await self.server.start_server()
+
+    async def test_api_proxy_preserves_metadata_and_only_caller_credentials(self):
+        calls = []
+        async def upstream(request):
+            calls.append((request.path_qs, dict(request.headers), await request.read()))
+            headers = {name: str(i) for i, name in enumerate(relay.API_RESPONSE_HEADERS[1:])}
+            headers.update({'Content-Type': 'image/png', 'Set-Cookie': 'upstream=secret', 'X-Private': 'hidden'})
+            return aiohttp.web.Response(body=b'png-test-data', headers=headers)
+        await self.enable_api(upstream)
+        async with self.session.post(self.base + '/v1/view/observe/world?test=a%20b', data=b'{}',
+                headers={'Authorization': 'Bearer caller-only', 'Cookie': 'private-browser-cookie', 'Origin': self.base}) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.read(), b'png-test-data')
+            for i, name in enumerate(relay.API_RESPONSE_HEADERS[1:]): self.assertEqual(response.headers[name], str(i))
+            self.assertNotIn('Set-Cookie', response.headers)
+            self.assertNotIn('X-Private', response.headers)
+        self.assertEqual(calls[0][0], '/v1/view/observe/world?test=a%20b')
+        self.assertEqual(calls[0][1]['Authorization'], 'Bearer caller-only')
+        self.assertNotIn('Cookie', calls[0][1])
+        self.assertEqual(calls[0][2], b'{}')
+        async with self.session.get(self.base + '/llms.txt') as response:
+            self.assertEqual(response.status, 200)
+            self.assertIn('OPENTTD_ALLOW_TAILSCALE_HTTP', await response.text())
+        async with self.session.get(self.base + '/agent/client.zip') as response:
+            self.assertEqual(response.status, 200)
+            self.assertTrue((await response.read()).startswith(b'PK'))
+
+    async def test_api_proxy_rejects_bad_headers_origins_paths_and_oversize_without_forwarding(self):
+        calls = []
+        async def upstream(request):
+            calls.append(await request.read())
+            return aiohttp.web.json_response({'ok': True})
+        await self.enable_api(upstream)
+        for headers in [[('Authorization', 'Bearer a'), ('Authorization', 'Bearer b')], [('Origin', 'http://evil.invalid')]]:
+            async with self.session.post(self.base + '/v1/actions', data=b'{}', headers=headers) as response:
+                self.assertIn(response.status, (400, 403))
+        async with self.session.post(self.base + '/v1/actions', data=b'x' * (relay.API_BODY_LIMIT + 1)) as response:
+            self.assertEqual(response.status, 413)
+        async with self.session.get(self.base + '/v1/%6de') as response:
+            # Use raw socket below for path spellings normalized by HTTP clients.
+            await response.read()
+        calls.clear()
+        reader, writer = await asyncio.open_connection('127.0.0.1', self.port)
+        writer.write(f'GET /v1/me#ignored HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\nConnection: close\r\n\r\n'.encode())
+        await writer.drain()
+        self.assertIn(b'400', (await reader.read()).split(b'\r\n', 1)[0])
+        writer.close(); await writer.wait_closed()
+        self.assertEqual(calls, [])
+        async with self.session.post(self.base + '/v1/actions', data=b'x' * relay.API_BODY_LIMIT) as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(len(calls[0]), relay.API_BODY_LIMIT)
+
+    async def test_api_proxy_does_not_follow_redirects_or_collapse_duplicate_image_headers(self):
+        calls = []
+        async def upstream(request):
+            calls.append(request.path)
+            if request.path == '/v1/redirect':
+                return aiohttp.web.Response(status=302, headers={'Location': 'http://elsewhere.invalid/secret'})
+            return aiohttp.web.Response(body=b'bad', headers=[('X-OpenTTD-Image-Id', 'a'), ('X-OpenTTD-Image-Id', 'b')])
+        await self.enable_api(upstream)
+        async with self.session.get(self.base + '/v1/redirect', allow_redirects=False) as response:
+            self.assertEqual(response.status, 302); self.assertNotIn('Location', response.headers)
+        async with self.session.get(self.base + '/v1/view/observe/world') as response:
+            self.assertEqual(response.status, 502)
+        self.assertEqual(calls, ['/v1/redirect', '/v1/view/observe/world'])
+
+    async def test_api_proxy_streams_sse_and_releases_capacity_after_disconnect(self):
+        started = asyncio.Event()
+        async def upstream(request):
+            if request.path == '/v1/me': return aiohttp.web.json_response({'ok': True})
+            response = aiohttp.web.StreamResponse(headers={'Content-Type': 'text/event-stream'})
+            await response.prepare(request)
+            await response.write(b'data: hello\n\n'); started.set()
+            await asyncio.sleep(.15)
+            return response
+        await self.enable_api(upstream)
+        with patch.object(relay, 'API_LIMIT', 1):
+            response = await self.session.get(self.base + '/v1/events')
+            self.assertEqual(await response.content.readexactly(13), b'data: hello\n\n')
+            async with self.session.get(self.base + '/v1/me') as busy:
+                self.assertEqual(busy.status, 503)
+            response.close()
+            async with asyncio.timeout(2):
+                while True:
+                    async with self.session.get(self.base + '/v1/me') as retry:
+                        if retry.status == 200: break
+                    await asyncio.sleep(.02)
+
     async def test_static_bootstrap_and_rejections(self):
         async with self.session.get(self.base + '/browser-config.js') as response:
             self.assertEqual(response.status, 200)
@@ -113,7 +209,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
             async with self.session.get(self.base + '/browser-config.js', headers={'Host': f'{host}:{self.port}'}) as response:
                 config = json.loads((await response.text()).split('=', 1)[1].rstrip(';\n'))
                 self.assertEqual(config['worldId'], 'world-epoch')
-                self.assertEqual(config['apiOrigin'], f'http://{host}:18160')
+                self.assertEqual(config['apiOrigin'], f'http://{host}:{self.port}')
                 self.assertEqual(config['nativePort'], 55029)
                 self.assertNotIn('company', config)
         for name, content_type in relay.ENTRY_ASSETS.items():

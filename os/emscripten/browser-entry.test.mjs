@@ -62,7 +62,7 @@ test('cookie needs current world, correct port and a real company slot', () => {
   assert.equal(api.remembered(cookie('epoch', 0), '18087', null), null);
 });
 
-function app({cookie = '', hash = '', available = true, protocol = 'http:'} = {}) {
+function app({cookie = '', hash = '', available = true, protocol = 'http:', webLocks = true, clipboard = true} = {}) {
   const nodes = new Map();
   function node(id) {
     if (!nodes.has(id)) nodes.set(id, {hidden: true, value: id === 'agent-mode' ? 'text' : 'Make revenue', textContent: '', listeners: {},
@@ -70,12 +70,14 @@ function app({cookie = '', hash = '', available = true, protocol = 'http:'} = {}
     return nodes.get(id);
   }
   node('welcome').hidden = false;
-  const document = {cookie, getElementById: node};
+  const document = {cookie, getElementById: node, execCommand(command) {state.copies.push(command); return true;}};
   const state = {loads: 0, copies: [], locks: 0, document, replaced: 0};
   const env = {document, location: {protocol, port: '18087', hash, pathname: '/', search: '', reload() {}}, history: {replaceState() {state.replaced++;}}, console,
     navigator: {locks: {request(name, options, callback) { state.locks++; callback(available ? {} : null); return new Promise(() => {}); }},
       clipboard: {async writeText(value) { state.copies.push(value); }}}};
   env.window = env;
+  if (!webLocks) delete env.navigator.locks;
+  if (!clipboard) delete env.navigator.clipboard;
   vm.runInNewContext(source, env);
   env.OpenTTDBrowser.init({worldId: 'epoch', apiOrigin: 'http://localhost:18160'}, () => state.loads++);
   return {...state, state, env, nodes, click: id => node(id).listeners.click()};
@@ -148,7 +150,7 @@ function bootstrap({failure = null} = {}) {
     FS: {mkdir() {}, mount() {}, syncfs(read, callback) {counts.syncs++; callback(failure === (read ? 'read' : 'write') ? Error('blocked') : null);}},
     IDBFS: {}, document: {addEventListener() {}}, SOCKFS: {websocket_sock_ops: {createPeer() {}}},
     window: {OPENTTD_BROWSER_RELAY: {nativePort: 55029, company: 1, websocketPath: '/native', publicOrigin: 'https://game.example.ts.net:8443'},
-      OpenTTDBrowser: {prepareIdentity() {}}, openttd_browser_storage_failed() {counts.failed++;}}};
+      OpenTTDBrowser: {prepareIdentity() {return key;}, persistIdentity() {return failure === 'identity' ? Promise.reject(Error('blocked')) : Promise.resolve(key);}}, openttd_browser_storage_failed() {counts.failed++;}}};
   vm.runInNewContext(pre, env);
   return {env, counts};
 }
@@ -161,11 +163,61 @@ test('HTTPS bootstrap keeps the native relay fixed and uses WSS', () => {
   assert.equal(env.Module.websocket.url('elsewhere', 55029, 'tcp'), 'wss://game.example.ts.net:8443/denied-native-destination');
 });
 
-test('native startup waits for identity flush, and storage failures leave startup blocked', () => {
+test('native startup waits for identity flush, and storage failures leave startup blocked', async () => {
   const a = bootstrap(); a.env.Module.preRun[0]();
+  await new Promise(setImmediate);
   assert.equal(a.counts.syncs, 2); assert.equal(a.counts.ready, 1); assert.equal(a.counts.failed, 0);
-  for (const failure of ['read', 'write']) {
+  for (const failure of ['read', 'write', 'identity']) {
     const b = bootstrap({failure}); b.env.Module.preRun[0]();
+    await new Promise(setImmediate);
     assert.equal(b.counts.ready, 0); assert.equal(b.counts.failed, 1);
   }
+});
+
+test('HTTP without Web Locks starts normally and copy uses its synchronous fallback', async () => {
+  const a = app({webLocks: false, clipboard: false});
+  a.click('choose-agent'); await a.click('copy-agent-prompt');
+  assert.deepEqual(a.state.copies, ['copy']);
+  assert.match(a.nodes.get('welcome-status').textContent, /Prompt copied/);
+  a.click('new-company'); assert.equal(a.state.loads, 1); assert.equal(a.state.locks, 0);
+});
+
+test('canonical identity replaces a different valid filesystem identity before startup', () => {
+  const api = library(), fs = filesystem({'/game/openttd.cfg': '[version]\nini_version = 8\n', '/game/secrets.cfg': '[network]\nclient_secret_key = ' + key + '\n'});
+  assert.equal(api.prepareIdentity(fs, crypto, '/game', 'cd'.repeat(32)), 'cd'.repeat(32));
+  assert.equal(api.iniSetting(fs.data.get('/game/secrets.cfg'), 'network', 'client_secret_key').value, 'cd'.repeat(32));
+});
+
+function database(initial, {abort = false, broken = false} = {}) {
+  let stored = initial, active = false;
+  const queue = [];
+  function drain() { if (active || !queue.length) return; active = true; setImmediate(queue.shift()); }
+  return {open() {
+    const db = {close() {}, transaction() {
+      if (broken) throw Error('missing store');
+      let proposed, cancelled = false;
+      const tx = {abort() {cancelled = true;}, objectStore() {return {
+        add(value) {proposed = value;},
+        get() {const request = {}; queue.push(() => {
+          request.result = stored; request.onsuccess();
+          setImmediate(() => {if (abort || cancelled) tx.onabort(); else {if (proposed !== undefined) stored = proposed; tx.oncomplete();} active = false; drain();});
+        }); drain(); return request;}
+      };}};
+      return tx;
+    }};
+    const request = {result: db}; setImmediate(() => request.onsuccess()); return request;
+  }};
+}
+
+test('concurrent first-use transactions choose one durable identity and preserve an existing one', async () => {
+  const api = library(), idb = database(undefined);
+  const [a, b] = await Promise.all([api.persistIdentity(idb, key), api.persistIdentity(idb, 'cd'.repeat(32))]);
+  assert.equal(a, key); assert.equal(b, key);
+  assert.equal(await api.persistIdentity(idb, 'ef'.repeat(32)), key);
+});
+
+test('invalid canonical identity, transaction abort and malformed store fail closed', async () => {
+  const api = library();
+  for (const idb of [database('corrupt'), database(undefined, {abort: true}), database(undefined, {broken: true})])
+    await assert.rejects(api.persistIdentity(idb, key), /unavailable/);
 });
