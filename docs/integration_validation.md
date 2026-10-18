@@ -138,7 +138,59 @@ The unchanged `c144f07853` frontend passed 34 browser tests and independent sour
 
 Browser text replacement completed with zero native commands and left the public company name unchanged. A separate click on native OK produced one `RenameCompany` command (62) and changed the public name to “Browser QA 02”. The saved `023-after-dom-native.png` shows that committed name in native company/finance headers and the status bar, with the edit popup closed; an earlier edited-field image is not saved-name proof. Core evidence and independent release review: `/tmp/openttd-browser-core-root-release-go.json` (SHA-256 `0918fa5550e11bcfb41323782b6f655ed3a8139993a4632760ff198e5a2b791c`), referencing the road, pre-confirmation and post-confirmation audits and images under `/tmp/openttd-web-play-proof02`.
 
-This establishes those finite browser effects, not full GUI support, semantic parity or autonomous gameplay success. Retained displayed dispatch PNGs and posted image IDs support qualified continuity evidence; raw CDP PNG response-body hash binding remains incomplete for all three core actions. The technical operator refreshed through the real DOM before dispatch from previously inspected coordinates, then independently compared the target scene. It does not prove the model inspected every exact fresh dispatch PNG and does not relax the Luna assessment's viewed-exact-PNG rule. The same QA fixture resumed after a premature stop with its original cutoff retained. Ancillary browser claims still await independent final review. Human-play launch verification and release remain pending; no readiness claim is made here.
+This establishes those finite browser effects, not full GUI support, semantic parity or autonomous gameplay success. Retained displayed dispatch PNGs and posted image IDs support qualified continuity evidence; raw CDP PNG response-body hash binding remains incomplete for all three core actions. The technical operator refreshed through the real DOM before dispatch from previously inspected coordinates, then independently compared the target scene. It does not prove the model inspected every exact fresh dispatch PNG and does not relax the Luna assessment's viewed-exact-PNG rule. The same QA fixture resumed after a premature stop with its original cutoff retained. Ancillary browser claims still await independent final review. These capture checks do not establish native browser readiness; the separate [native client verification](#native-browser-client) covers that route.
+
+## Native browser client
+
+Human browser play now uses the upstream Emscripten/SDL2 game client with local
+rendering and native input. A separate fixed loopback WebSocket relay carries
+ordinary multiplayer traffic; it neither restarts the world nor uses an API
+bearer. The capture API remains available to visual agents. Independent design
+and source reviews approved the relay, browser-only company-chat availability,
+empty-name startup default and standard document fullscreen with SDL2 resizing.
+Seven isolated relay tests passed. See [startup instructions](../os/emscripten/README.md#fixed-loopback-native-relay).
+
+Chrome checks on a separate preserved 128-square world verified native hover
+tooltips, title-bar dragging with intermediate movement, right-drag panning,
+wheel zoom, native text input, and paid road construction. The road drag cost
+486 and increased public road infrastructure from zero to six. A normal API
+company rename appeared in the native Players window without a desync. Company
+0 sent a private message to API company 1, received its API reply in the native
+view, and sent another private message while fullscreen. Unrelated company 2
+could not list that thread and received `404 thread_unavailable` for its history.
+
+Fresh-profile autojoin used the default `Browser player`; a saved custom player
+name survived reload. Two fullscreen entry/exit cycles retained nonzero native
+backing dimensions and correct dragging/click coordinates. The final control
+position leaves the native toolbar visible. A 60-second running-world sample
+advanced the native date without a disconnect or desync, and the browser made no
+capture-API requests. Early failed Chrome starts, the original missing-name
+error and legacy-fullscreen bitmap failure remain recorded; the latter two
+received product fixes. Headless Chrome needed `--password-store=basic` after
+network logs exposed a stalled cookie-store load. Stock filesystem-sync warnings
+were retained.
+
+The final four-file build manifest has SHA-256
+`1bad240d5b3aae6645a252c32ea31ceb84ffcb2cc26332e85bb50918f93ee5c8`.
+Its archive base is `6a96be9db6`, with reviewed browser overlays through
+`040410de38`; its ordinary multiplayer revision matches the unchanged
+`4e26eb85…` native server. Runtime records are under
+`/tmp/openttd-native-browser-qa-evidence07` through `evidence10`.
+Mouse-press event handling p95 was 8.943 ms and browser RAF interval p95 was
+16.8 ms in the small fixture. These measure Chromium event handling and browser
+scheduling, respectively; neither is a measured input-to-game-paint bound nor a
+500-vehicle WASM performance result. This browser proof does not close the
+separate four-company gameplay acceptance gate.
+
+The final build also joined the existing 512-square overnight world through the
+separate localhost relay, showing the human company and all seven companies.
+That read-only browser smoke issued no gameplay or chat actions. The original
+world epoch and engine instance remained unchanged and unpaused; the disposable
+QA world and browsers were closed. The running relay uses the read-only release
+whose manifest is SHA-256
+`9cdedd25de9dc5389b37194d86bd7deb665e0dbc9e04d6b96cf1f5503511ffcb`.
+Operational readiness is recorded in `.worlds/overnight-browser-readiness.json`;
+the game and relay remain running independently of the browser.
 
 ## Checkpoint observations
 
@@ -158,7 +210,7 @@ The backend admits 64 API requests and 64 image responses, with eight image look
 
 The separate frozen runtime04 run on native `4e26eb85…` and its pinned backend/driver measured 03:27:47–03:57:47 UTC on 2026-10-18 (1,800.000141 seconds). It passed all 18 unchanged declared workload checks: 500 active buses across eight companies, 50 browser-protocol viewers, four visual clients sharing four views, and three independent one-bus sentinel groups. All 1,800 actions completed and all 90,000 exact chat/viewer pairs arrived, with zero measured HTTP/client errors or sampling gaps. Action ACK p95 was 73.3 ms and chat delivery p95 199.3 ms. The primary minimum completed five-second speed ratio was 0.99465; sentinel minima were 0.99481, 0.98243 and 0.97801. Conservative whole-interval lower bounds were 0.99168 for each world.
 
-This is `TARGET_PASS` under those declared checks, with 50 distinct viewers and complete delivery, not proof of 50 simultaneous SSE streams throughout: eight of 360 steady samples fell below 50 connections, reaching 37. First/final boundary minima, native queue depth, actual send/slot saturation, one fresh frame per second and 50 separate renderers remain unproven. Authorized Luna, permanent-world and private browser-QA overlap prevents an isolated comparison or a causal claim about historical failures. Independent review preserved the frozen inputs and historical records. Evidence: `/tmp/openttd-load-runtime04-rpcbrackets-38979-20261018`, `/tmp/openttd-load-runtime04-independent-post-review.json` and `/tmp/openttd-load-runtime04-final-attestation.json` (SHA-256 `671c2c3cc978345002a1c4540aed68e1b192e78d3f4aa35d4162fb1f6ac9866c`). The [full attribution](../tests/integration/LOAD.md#frozen-runtime04-result-2026-10-18) pins the native and runtime manifest. Its protocol clients and earlier frozen frontend assets do not test the later `c144f07853` browser controls; the separate [finite browser proof](#playable-browser-core) does. Human-play release verification remains pending. The completed [runtime04 Luna trial](luna-trial-04.md) did not meet full gameplay acceptance; this load result does not close that gate.
+This is `TARGET_PASS` under those declared checks, with 50 distinct viewers and complete delivery, not proof of 50 simultaneous SSE streams throughout: eight of 360 steady samples fell below 50 connections, reaching 37. First/final boundary minima, native queue depth, actual send/slot saturation, one fresh frame per second and 50 separate renderers remain unproven. Authorized Luna, permanent-world and private browser-QA overlap prevents an isolated comparison or a causal claim about historical failures. Independent review preserved the frozen inputs and historical records. Evidence: `/tmp/openttd-load-runtime04-rpcbrackets-38979-20261018`, `/tmp/openttd-load-runtime04-independent-post-review.json` and `/tmp/openttd-load-runtime04-final-attestation.json` (SHA-256 `671c2c3cc978345002a1c4540aed68e1b192e78d3f4aa35d4162fb1f6ac9866c`). The [full attribution](../tests/integration/LOAD.md#frozen-runtime04-result-2026-10-18) pins the native and runtime manifest. Its protocol clients and earlier frozen frontend assets do not test the later `c144f07853` browser controls; the separate [finite browser proof](#playable-browser-core) does. Native browser verification is recorded [separately](#native-browser-client). The completed [runtime04 Luna trial](luna-trial-04.md) did not meet full gameplay acceptance; this load result does not close that gate.
 
 Request rate, image latency and image freshness are separate measurements. Renderers may retain a parked frame for roughly eight seconds; repeated one-second requests can return that same immutable image. The earlier smoke observed source-image age near eight seconds and three to four unique frames per view in 20 seconds. This does not demonstrate one fresh frame per second or 50 independent rendering workers.
 
@@ -170,4 +222,4 @@ The connection remained established until the probe closed its own socket at 8.1
 
 ## Running locally
 
-Use [the launcher instructions](../tools/README.md) and [the API guide](../backend/README.md). Humans can use the matching native client; external text and visual agents use the authenticated API. The `c144f07853` browser-control source adds native click/drag, Ctrl and text input through existing visual actions, with 34 browser tests and independent source review passing. Actual Chrome road construction and separate text/OK effects are verified within the [finite scope above](#playable-browser-core); human-play release verification remains pending. Remote access requires an independently operated HTTPS proxy. No external site has been deployed.
+Use [the launcher instructions](../tools/README.md) and [the API guide](../backend/README.md). Humans can use the matching native client; external text and visual agents use the authenticated API. The `c144f07853` browser-control source adds native click/drag, Ctrl and text input through existing visual actions, with 34 browser tests and independent source review passing. Actual Chrome road construction and separate text/OK effects are verified within the [finite scope above](#playable-browser-core); human browser play uses the separately verified [native WebAssembly client](#native-browser-client). Remote access requires an independently operated HTTPS proxy. No external site has been deployed.
