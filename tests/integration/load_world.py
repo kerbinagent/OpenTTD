@@ -32,6 +32,132 @@ from engine_harness import LiveWorld, RPCError
 
 TERMINAL = {"completed", "rejected", "uncertain", "resolved_rolled_back"}
 TICK_SECONDS = 0.027  # src/gfx_type.h MILLISECONDS_PER_TICK; no fast-forward.
+TICK_MEASUREMENT_FORMAT = "rpc_brackets_v1"
+LEGACY_TICK_MEASUREMENT = object()  # Only an absent configuration field means legacy.
+
+
+def validate_tick_sample(sample, expected=None):
+    """Validate a private hello observation and its local RPC time bracket."""
+    if not isinstance(sample, dict):
+        raise ValueError("tick sample is not an object")
+    for name in ("tick", "rpc_started_monotonic_ns", "rpc_received_monotonic_ns"):
+        maximum = (1 << 64)-1 if name == "tick" else (1 << 63)-1
+        if type(sample.get(name)) is not int or not 0 <= sample[name] <= maximum:
+            raise ValueError(f"invalid tick sample {name}")
+    if sample["rpc_received_monotonic_ns"] < sample["rpc_started_monotonic_ns"]:
+        raise ValueError("reversed tick RPC bracket")
+    if type(sample.get("observed_monotonic")) is not float or not math.isfinite(sample["observed_monotonic"]):
+        raise ValueError("invalid tick receipt timestamp")
+    for name in ("world_id", "world_epoch", "engine_instance_id"):
+        if not isinstance(sample.get(name), str) or not sample[name]:
+            raise ValueError(f"invalid tick sample {name}")
+    if (sample.get("hello_type") != "hello.result" or sample.get("hello_status") != "completed"
+            or sample.get("hello_role") != "world"):
+        raise ValueError("tick sample is not a ready authoritative hello")
+    if sample.get("observed_monotonic") != sample["rpc_received_monotonic_ns"] / 1e9:
+        raise ValueError("tick receipt timestamp differs from RPC bracket")
+    if expected is not None:
+        for name in ("world_id", "world_epoch", "engine_instance_id"):
+            if sample[name] != expected[name]:
+                raise ValueError(f"tick sample changed {name}")
+    return sample
+
+
+def tick_window_diagnostic(previous, current, receipt_ratio, threshold=.95):
+    """Bound native progress using only the two client-side RPC brackets."""
+    if receipt_ratio is not None and (isinstance(receipt_ratio, bool) or
+            not isinstance(receipt_ratio, (int, float)) or not math.isfinite(receipt_ratio)):
+        raise ValueError("invalid receipt ratio")
+    validate_tick_sample(previous)
+    validate_tick_sample(current, previous)
+    if current["tick"] < previous["tick"]:
+        raise ValueError("tick counter reversed")
+    if (current["rpc_started_monotonic_ns"] <= previous["rpc_started_monotonic_ns"]
+            or current["rpc_received_monotonic_ns"] <= previous["rpc_received_monotonic_ns"]):
+        raise ValueError("tick sample chronology reversed")
+    maximum_ns = current["rpc_received_monotonic_ns"] - previous["rpc_started_monotonic_ns"]
+    minimum_ns = max(0, current["rpc_started_monotonic_ns"] - previous["rpc_received_monotonic_ns"])
+    tick_delta = current["tick"] - previous["tick"]
+    progress_ns = tick_delta * 27_000_000
+    lower = progress_ns / maximum_ns
+    upper = progress_ns / minimum_ns if minimum_ns else None
+    if upper is not None and receipt_ratio is not None and receipt_ratio < threshold and upper < threshold:
+        classification = "proven_slow_within_brackets"
+    elif receipt_ratio is not None and receipt_ratio >= threshold and lower >= threshold:
+        classification = "receipt_pass_corroborated"
+    else:
+        classification = "timing_inconclusive"
+    return {"tick_delta": tick_delta, "minimum_elapsed_ns": minimum_ns, "maximum_elapsed_ns": maximum_ns,
+            "previous_rpc_roundtrip_ns": previous["rpc_received_monotonic_ns"]-previous["rpc_started_monotonic_ns"],
+            "current_rpc_roundtrip_ns": current["rpc_received_monotonic_ns"]-current["rpc_started_monotonic_ns"],
+            "normal_speed_lower_bound": lower, "normal_speed_upper_bound": upper,
+            "upper_bound_reason": "overlapping_rpc_brackets" if upper is None else None,
+            "receipt_ratio": receipt_ratio, "classification": classification}
+
+
+def analyze_tick_brackets(measurement_format, baselines, samples, manifest_ids):
+    """Recompute future-run diagnostics from raw observations; retain every window."""
+    if measurement_format is LEGACY_TICK_MEASUREMENT:
+        return {"proof_valid": True, "status": "legacy_unavailable", "windows": {}, "errors": []}
+    if measurement_format != TICK_MEASUREMENT_FORMAT:
+        return {"proof_valid": False, "status": "unknown_format", "windows": {},
+                "errors": ["unknown tick measurement format"]}
+    errors, windows = [], {str(world): [] for world in manifest_ids}
+    previous = {}
+    for row in baselines:
+        world = str(row.get("world"))
+        if world not in windows or world in previous:
+            errors.append(f"duplicate or unknown baseline world {world}")
+            continue
+        try:
+            sample = validate_tick_sample(row.get("observation"))
+            if sample["world_id"] != manifest_ids[world]:
+                raise ValueError("baseline world differs from manifest")
+            previous[world] = sample
+        except (TypeError, ValueError) as error:
+            errors.append(f"baseline world {world}: {error}")
+    for world in windows:
+        if world not in previous:
+            errors.append(f"missing valid baseline world {world}")
+    for index, row in enumerate(samples):
+        worlds = row.get("worlds")
+        if not isinstance(worlds, dict):
+            errors.append(f"sample {index}: missing worlds")
+            for world in windows:
+                windows[world].append({"sample_index": index, "error": "missing worlds"})
+            continue
+        if set(worlds) != set(windows):
+            errors.append(f"sample {index}: missing or unexpected world entries")
+        for world in windows:
+            entry = {"sample_index": index}
+            windows[world].append(entry)
+            try:
+                sample = validate_tick_sample(worlds.get(world))
+                if sample["world_id"] != manifest_ids[world]:
+                    raise ValueError("sample world differs from manifest")
+                prior = previous.get(world)
+                if prior is None:
+                    raise ValueError("missing valid baseline or predecessor")
+                elapsed = sample["observed_monotonic"] - prior["observed_monotonic"]
+                if elapsed <= 0:
+                    raise ValueError("receipt chronology reversed")
+                ratio = None if elapsed < 4 else (sample["tick"]-prior["tick"])*TICK_SECONDS/elapsed
+                stored_ratio = worlds[world].get("normal_speed_ratio")
+                if stored_ratio is not None and (type(stored_ratio) is not float or not math.isfinite(stored_ratio)):
+                    raise ValueError("invalid stored receipt ratio")
+                if stored_ratio != ratio:
+                    raise ValueError("stored receipt ratio differs from raw tick bracket")
+                entry.update(tick_window_diagnostic(prior, sample, ratio))
+                if ratio is None:
+                    entry["short_window_unproven"] = True
+                previous[world] = sample
+            except (TypeError, ValueError) as error:
+                entry["error"] = str(error)
+                errors.append(f"sample {index} world {world}: {error}")
+                # Keep the predecessor: a corrupt or changed fence cannot reset a window.
+    return {"proof_valid": not errors, "status": "valid" if not errors else "invalid",
+            "windows": windows, "errors": errors,
+            "edge_limit": "First and final short windows outside completed sample pairs remain unproven."}
 
 
 class HTTPFailure(RPCError):
@@ -43,6 +169,11 @@ class HTTPFailure(RPCError):
 def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     path.chmod(0o600)
+
+
+def file_sha256(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def percentile(values, fraction):
@@ -87,7 +218,7 @@ def copy_initial_fixture(args):
         raise
     if digest.hexdigest() != provenance["save_sha256"]:
         raise RPCError("Initial fixture checksum does not match provenance")
-    provenance["import_binary_sha256"] = hashlib.file_digest(args.binary.open("rb"), "sha256").hexdigest()
+    provenance["import_binary_sha256"] = file_sha256(args.binary)
     directory_fd = os.open(args.output, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(directory_fd)
@@ -679,32 +810,51 @@ class Load:
             self._sample()
             return dict(self.previous_ticks) if freeze else None
 
+    @staticmethod
+    def tick_sample(group):
+        started_ns = time.monotonic_ns()
+        reply = group.world.rpc("hello")
+        received_ns = time.monotonic_ns()
+        if not isinstance(reply, dict):
+            raise RPCError("Malformed native hello reply")
+        sample = {"tick": reply.get("tick"), "observed_monotonic": received_ns / 1e9,
+                  "rpc_started_monotonic_ns": started_ns, "rpc_received_monotonic_ns": received_ns,
+                  "world_id": reply.get("world_id"), "world_epoch": reply.get("world_epoch"),
+                  "engine_instance_id": reply.get("engine_instance_id"), "hello_status": reply.get("status"),
+                  "hello_type": reply.get("type"),
+                  "hello_role": reply.get("result", {}).get("role") if isinstance(reply.get("result"), dict) else None}
+        expected = {"world_id": group.world.world_id, "world_epoch": group.world.epoch,
+                    "engine_instance_id": group.world.instance}
+        return validate_tick_sample(sample, expected)
+
     def begin_steady(self):
         with self.sample_lock:
             self.previous_ticks.clear(); self.steady_ticks.clear(); self.speeds.clear()
             for group in self.groups:
-                tick = group.world.rpc("hello")["tick"]
-                observation = (time.monotonic(), tick)
+                observation = self.tick_sample(group)
                 self.previous_ticks[group.index] = observation
                 self.steady_ticks[group.index] = observation
+                self.metrics.emit("tick_baseline", world=group.index, observation=observation)
             self.window_started = time.monotonic(); self.moved.clear()
 
     def _sample(self):
         now = time.monotonic()
         tick_samples = {}
         for group in self.groups:
-            reply = group.world.rpc("hello")
-            tick = reply["tick"]
-            observed = time.monotonic()
+            observation = self.tick_sample(group)
+            tick = observation["tick"]
+            observed = observation["observed_monotonic"]
             prior = self.previous_ticks.get(group.index)
-            ratio = None if prior is None or observed-prior[0] < 4 else (tick-prior[1])*TICK_SECONDS/(observed-prior[0])
-            self.previous_ticks[group.index] = (observed, tick)
+            ratio = None if prior is None or observed-prior["observed_monotonic"] < 4 else (tick-prior["tick"])*TICK_SECONDS/(observed-prior["observed_monotonic"])
+            if prior is not None:
+                tick_window_diagnostic(prior, observation, ratio)
+            self.previous_ticks[group.index] = observation
             if self.metrics.phase == "steady":
-                self.steady_ticks.setdefault(group.index, (observed, tick))
+                self.steady_ticks.setdefault(group.index, observation)
                 if ratio is not None:
                     self.speeds[group.index].append(ratio)
             group.http[0].request("GET", "/v1/me", metric=f"world{group.index}_api_probe")
-            tick_samples[group.index] = {"tick": tick, "observed_monotonic": observed, "normal_speed_ratio": ratio}
+            tick_samples[group.index] = {**observation, "normal_speed_ratio": ratio}
         vehicles = self.groups[0].vehicles()
         active = sum(not v["stopped"] and not v["crashed"] and v["order_count"] >= 2 for _, v in vehicles)
         self.last_active = active
@@ -863,7 +1013,7 @@ def analyze_results(directory):
     attempts, successes, failures = Counter(), Counter(), []
     clients = defaultdict(Counter)
     timings = defaultdict(list)
-    samples, deliveries, completed = [], 0, False
+    samples, baselines, deliveries, completed = [], [], 0, False
     visual_clients = set()
     memory_peaks = Counter()
     accepted_messages, delivery_pairs = set(), set()
@@ -915,30 +1065,46 @@ def analyze_results(directory):
                 failures.append({"kind": kind, "monotonic": row["monotonic"]})
             if kind == "world_sample":
                 samples.append(row)
-                world_ids.update(row["worlds"])
+                if isinstance(row.get("worlds"), dict):
+                    world_ids.update(row["worlds"])
+            if kind == "tick_baseline":
+                baselines.append(row)
             if kind == "image_frame_age":
                 timings[kind].append(row["seconds"])
                 image_counts[row["view"]] += 1
             if kind == "client_cadence_missed":
                 cadence[row.get("schedule", "unlabelled")] += row.get("missed_slots", 1)
     elapsed = original["steady_seconds"]
+    bracket_diagnostics = analyze_tick_brackets(config.get("tick_measurement_format", LEGACY_TICK_MEASUREMENT), baselines, samples,
+        {str(index): world["id"] for index, world in enumerate(manifest["worlds"])})
     interior = samples[1:-1]
     speed_bound, window_minimum, sampling_gaps = {}, {}, []
     if len(interior) >= 2:
         for world in sorted(world_ids):
-            speed_bound[world] = (interior[-1]["worlds"][world]["tick"]-interior[0]["worlds"][world]["tick"])*TICK_SECONDS/elapsed
+            if all(isinstance(row.get("worlds"), dict) and isinstance(row["worlds"].get(world), dict) and
+                   type(row["worlds"][world].get("tick")) is int for row in (interior[0], interior[-1])):
+                speed_bound[world] = (interior[-1]["worlds"][world]["tick"]-interior[0]["worlds"][world]["tick"])*TICK_SECONDS/elapsed
             windows = []
             for index, row in enumerate(samples):
-                ratio = row["worlds"][world].get("normal_speed_ratio")
-                if ratio is not None:
+                world_sample = (row.get("worlds") or {}).get(world, {}) if isinstance(row.get("worlds"), dict) else {}
+                ratio = world_sample.get("normal_speed_ratio") if isinstance(world_sample, dict) else None
+                valid_ratio = type(ratio) is float and math.isfinite(ratio)
+                if valid_ratio:
                     windows.append(ratio)
                 if index:
                     previous = samples[index-1]
-                    timestamp = row["worlds"][world].get("observed_monotonic", row["monotonic"])
-                    prior = previous["worlds"][world].get("observed_monotonic", previous["monotonic"])
-                    if not 4 <= timestamp-prior <= 6 or ratio is None:
-                        sampling_gaps.append({"world": world, "seconds": timestamp-prior, "ratio_available": ratio is not None})
+                    previous_world = (previous.get("worlds") or {}).get(world, {}) if isinstance(previous.get("worlds"), dict) else {}
+                    timestamp = world_sample.get("observed_monotonic", row["monotonic"]) if isinstance(world_sample, dict) else row["monotonic"]
+                    prior = previous_world.get("observed_monotonic", previous["monotonic"]) if isinstance(previous_world, dict) else previous["monotonic"]
+                    duration = timestamp-prior if (type(timestamp) in (int, float) and type(prior) in (int, float)
+                                                   and math.isfinite(timestamp) and math.isfinite(prior)) else None
+                    if duration is None or not 4 <= duration <= 6 or not valid_ratio:
+                        sampling_gaps.append({"world": world, "seconds": duration, "ratio_available": valid_ratio})
             window_minimum[world] = min(windows) if windows else None
+    if bracket_diagnostics["status"] == "valid" and len(interior) >= 2:
+        # For marked new runs, use the ratios recomputed from the raw fenced RPCs.
+        window_minimum = {world: min((entry["receipt_ratio"] for entry in rows if entry["receipt_ratio"] is not None), default=None)
+                          for world, rows in bracket_diagnostics["windows"].items()}
     expected_action = max(0, math.ceil((config["duration"]-.3)*config["action_rate"]))
     expected_chat = math.ceil(config["duration"]*config["chat_rate"])
     offered = (attempts["action_ack"] >= expected_action and attempts["chat_ack"] >= expected_chat
@@ -984,6 +1150,8 @@ def analyze_results(directory):
         "sampled_window_normal_speed": len(window_minimum) == 4 and all(ratio is not None and ratio >= .95 for ratio in window_minimum.values()),
         "action_ack_p95": ack95 is not None and ack95 < .5, "chat_delivery_p95": chat95 is not None and chat95 < 1,
         "no_action_chat_cadence_loss": not cadence["chat"] and not cadence["action"]}
+    if "tick_measurement_format" in config:
+        checks["tick_measurement_proof"] = bracket_diagnostics["proof_valid"]
     passed = all(checks.values())
     gauges = ("backend_pending_actions", "backend_pending_chat", "active_heads", "moving_now", "connected_sse")
     completion_counts = None
@@ -1020,6 +1188,7 @@ def analyze_results(directory):
             "p95_seconds": percentile(values, .95), "max_seconds": max(values)} for name, values in timings.items() if values},
         "whole_interval_normal_speed_lower_bound": speed_bound,
         "observed_interior_minimum_five_second_speed_ratio": window_minimum,
+        "tick_bracket_diagnostics": bracket_diagnostics,
         "sampling_gaps": sampling_gaps, "sampling_interval_bounds_seconds": [4, 6],
         "speed_method": "Total lower bound drops first/last steady samples and divides observed interior tick delta by full actual steady_seconds. Window minima include every completed steady sample and require4..6s spacing (per-world observed time when available, otherwise row-time proxy). Unobserved edges receive zero credit; first/final short-window minima are unproven.",
         "minimum_active_heads": minimum_active, "unique_frames_per_view": original.get("unique_frames_per_view"),
@@ -1029,9 +1198,9 @@ def analyze_results(directory):
         "completion_status_method": "Read-only backend ledger company.rename records created during the timed wall interval; completion is excluded from ACK latency and this status view is separate.",
         "sampled_ranges": {name: {"min": min(row[name] for row in samples), "max": max(row[name] for row in samples)} for name in gauges} if samples else {},
         "scope": "50 browser-protocol clients/four view credentials; primary road load plus three one-bus independent worlds; POST-to-SSE chat only, no native recipient acknowledgement; fault proof separate.",
-        "evidence_sha256": {name: hashlib.file_digest((directory / name).open("rb"), "sha256").hexdigest()
+        "evidence_sha256": {name: file_sha256(directory / name)
             for name in ("configuration.json", "manifest.json", "summary.json", "samples.jsonl")}}
-    result["analysis_source_sha256"] = hashlib.file_digest(Path(__file__).open("rb"), "sha256").hexdigest()
+    result["analysis_source_sha256"] = file_sha256(Path(__file__))
     write_json(directory / "audited-summary.json", result)
     return result
 
@@ -1061,13 +1230,14 @@ def main(argv=None):
             name: Path("/sys/fs/cgroup", name).read_text().strip()
             for name in ("cpu.max", "memory.max", "cpuset.cpus.effective")
             if Path("/sys/fs/cgroup", name).is_file()},
-        "binary_sha256": hashlib.file_digest(args.binary.open("rb"), "sha256").hexdigest(),
-        "driver_sha256": hashlib.file_digest(Path(__file__).open("rb"), "sha256").hexdigest(),
-        "backend_runtime_sha256": {str(path.relative_to(ROOT)): hashlib.file_digest(path.open("rb"), "sha256").hexdigest()
+        "binary_sha256": file_sha256(args.binary),
+        "driver_sha256": file_sha256(Path(__file__)),
+        "backend_runtime_sha256": {str(path.relative_to(ROOT)): file_sha256(path)
             for path in sorted([*ROOT.glob("backend/*.py"), *ROOT.glob("backend/schemas/*.json")])},
         "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "git_status": subprocess.check_output(["git", "status", "--short"], cwd=ROOT, text=True),
-        "tick_seconds": TICK_SECONDS, "transport": "real loopback HTTP/1.1 ASGI", "map": [512, 512],
+        "tick_seconds": TICK_SECONDS, "tick_measurement_format": TICK_MEASUREMENT_FORMAT,
+        "transport": "real loopback HTTP/1.1 ASGI", "map": [512, 512],
         "view_credentials": 4, "browser_connections": args.viewers, "visual_agents": 4,
         "loan_ceiling": 2000000, "native_queue_depth": "not instrumented; backend pending depth is separate",
         "world_loads": "primary road load; other worlds one normally ordered bus each",
@@ -1141,7 +1311,8 @@ def main(argv=None):
         for group in groups:
             first = load.steady_ticks.get(group.index)
             last = ending_ticks.get(group.index)
-            total_speed[group.index] = None if first is None or last is None or last[0] <= first[0] else (last[1]-first[1])*TICK_SECONDS/(last[0]-first[0])
+            total_speed[group.index] = (None if first is None or last is None or last["observed_monotonic"] <= first["observed_monotonic"]
+                else (last["tick"]-first["tick"])*TICK_SECONDS/(last["observed_monotonic"]-first["observed_monotonic"]))
         summary.update({"steady_seconds": elapsed, "requested_seconds": args.duration,
             "minimum_active_heads": load.minimum_active, "minimum_sampled_sse_connections": load.minimum_streams,
             "total_normal_speed_ratio": total_speed, "minimum_five_second_speed_ratio": {

@@ -113,6 +113,25 @@ are reported. Native command queue depth is not instrumented; backend ledger
 pending depth is identified separately. Queue ranges and process peaks can also
 be derived from these raw samples without rerunning load.
 
+New measurements label `tick_measurement_format` as `rpc_brackets_v1`. Each
+world's `hello` request records client monotonic start and receipt timestamps,
+the native tick, and the validated world, epoch and engine-instance fence.
+The existing `observed_monotonic` timestamp uses that same receipt observation.
+It measures receipt time, not the exact instant when the engine read its tick.
+Missing or malformed timing or identity data invalidates a bracket-enabled run;
+older runs without the format marker retain their original speed checks and
+report these additional diagnostics as unavailable.
+
+For consecutive requests, the engine's observation interval lies between
+`max(0, current_start - previous_receipt)` and
+`current_receipt - previous_start`. Tick progress divided by these interval
+bounds gives conservative speed bounds. A speed upper bound below 0.95 proves
+a slow interval within those brackets; a bound that straddles 0.95 leaves the
+timing inconclusive. These are diagnostics: they never promote a failed receipt
+ratio to a pass. The original receipt-based speed formula, minimum threshold,
+sampling cadence and workload denominators remain in force. The brackets do
+not identify the cause of a stall or supply exact native timestamps.
+
 The authoritative audit requires the full configuration, all 500 active heads,
 p95 action admission below 500 ms, p95 chat delivery below one second, no missing
 chat deliveries or client errors, and each world's total and minimum sampled
