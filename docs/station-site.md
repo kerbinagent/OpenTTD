@@ -45,6 +45,7 @@ and gameplay cargo calls retain their existing live-storage behavior. QueryCost
 station/road-stop availability suppresses malformed-callback GUI diagnostics;
 normal command and picker diagnostics retain their existing behavior.
 
-This isolation applies to the station coverage callback path. `land.info` has
-older native description, clearing and cargo callback paths that require a
-separate purity audit; this change does not establish purity for every reader.
+This isolation applies to the station coverage callback path. The separate
+[`land.info` audit and implementation](land-info.md) covers its description,
+per-tile acceptance and clearing callbacks; no blanket purity claim is made
+for every reader.

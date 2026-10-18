@@ -40,6 +40,7 @@
 #include "landscape_cmd.h"
 #include "terraform_cmd.h"
 #include "station_func.h"
+#include "town.h"
 #include "pathfinder/water_regions.h"
 #include "pathfinder/yapf/yapf_river_builder.h"
 
@@ -685,7 +686,7 @@ bool IsMapSurroundedByWater()
  * @param tile tile to clear
  * @return the cost of this operation or an error
  */
-CommandCost CmdLandscapeClear(DoCommandFlags flags, TileIndex tile)
+static CommandCost LandscapeClearImpl(DoCommandFlags flags, TileIndex tile, IndustryPresentationPsaOverlay *presentation_psa)
 {
 	CommandCost cost(ExpensesType::Construction);
 	bool do_clear = false;
@@ -718,7 +719,11 @@ CommandCost CmdLandscapeClear(DoCommandFlags flags, TileIndex tile)
 			return CommandCost(STR_ERROR_CAN_T_BUILD_ON_WATER);
 		}
 	} else {
-		cost.AddCost(_tile_type_procs[GetTileType(tile)]->clear_tile_proc(tile, flags));
+		if (presentation_psa != nullptr && IsTileType(tile, TileType::House)) {
+			cost.AddCost(ClearHouseForObservation(tile, flags, *presentation_psa));
+		} else {
+			cost.AddCost(_tile_type_procs[GetTileType(tile)]->clear_tile_proc(tile, flags));
+		}
 	}
 
 	if (flags.Test(DoCommandFlag::Execute)) {
@@ -736,6 +741,36 @@ CommandCost CmdLandscapeClear(DoCommandFlags flags, TileIndex tile)
 		}
 	}
 	return cost;
+}
+
+CommandCost CmdLandscapeClear(DoCommandFlags flags, TileIndex tile)
+{
+	return LandscapeClearImpl(flags, tile, nullptr);
+}
+
+namespace {
+
+/** One finite native query; retain Do's guard, nesting, scratch and rating-test hooks. */
+class LandscapeClearObservation final : protected CommandHelperBase {
+public:
+	static CommandCost Run(TileIndex tile, IndustryPresentationPsaOverlay &presentation_psa)
+	{
+		if (!Company::IsValidID(_current_company)) return CMD_ERROR;
+		const auto flags = CommandFlagsToDCFlags(GetCommandFlags<Commands::LandscapeClear>()) | DoCommandFlag::QueryCost;
+		if (tile != 0 && (tile >= Map::Size() || (!IsValidTile(tile) && !flags.Test(DoCommandFlag::AllTiles)))) return CMD_ERROR;
+		RecursiveCommandCounter counter{};
+		InternalDoBefore(counter.IsTopLevel(), true);
+		CommandCost cost = LandscapeClearImpl(DoCommandFlags{flags}.Reset(DoCommandFlag::Execute), tile, &presentation_psa);
+		InternalDoAfter(cost, flags, counter.IsTopLevel(), true);
+		return cost;
+	}
+};
+
+} // namespace
+
+CommandCost GetLandscapeClearCostForObservation(TileIndex tile, IndustryPresentationPsaOverlay &presentation_psa)
+{
+	return LandscapeClearObservation::Run(tile, presentation_psa);
 }
 
 /**

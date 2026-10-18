@@ -134,6 +134,9 @@ uint GetFoundationSpriteBlock (TileIndex tile);
 void DrawFoundation(TileInfo *ti, Foundation f);
 
 void DoClearSquare(TileIndex tile);
+struct IndustryPresentationPsaOverlay;
+/** Valid-company clear-cost test with explicit callback storage and normal command test bookkeeping. */
+CommandCost GetLandscapeClearCostForObservation(TileIndex tile, IndustryPresentationPsaOverlay &presentation_psa);
 void RunTileLoop();
 
 void InitializeLandscape();

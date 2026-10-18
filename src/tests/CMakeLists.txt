@@ -44,6 +44,7 @@ if(OPTION_INTEGRATION)
         test_integration_display_text.cpp
         test_integration_refit_subtypes.cpp
         test_integration_station_waiting.cpp
+        test_integration_land_info.cpp
         test_newgrf_industry_observation_overlay.cpp
         test_integration_question_window.cpp
     )

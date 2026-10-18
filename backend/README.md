@@ -155,7 +155,7 @@ Optional `ui.apply` responses and events expose only request ID and generic stat
 
 A verified visual loan used one native command, changed the loan principal in the ordinary finances screenshot from 100,000 to 110,000, reached a checkpointed terminal receipt and completed UI acknowledgement. After stopping and restarting the engine, backend and two renderers, the same credential and same request ID/payload returned the completed saved receipt; a new genuine screenshot still showed a 110,000 loan with no repeated borrowing. This proves that one restart/retry case, not the full four-mode fault matrix or workload target.
 
-The pinned ASGI environment passed 276 backend tests, including catalog identity, report projections, map pagination and the 40-second gesture ceiling. Public HTTP integration also verified construction, vehicle setup, delivery income and a later modification in each transport mode. These checks are separate from the mixed-world recovery and full workload gates recorded in [integration validation](../docs/integration_validation.md).
+The pinned ASGI environment passed 277 backend tests, including catalog identity, report projections, map pagination and the 40-second gesture ceiling. Public HTTP integration also verified construction, vehicle setup, delivery income and a later modification in each transport mode. These checks are separate from the mixed-world recovery and full workload gates recorded in [integration validation](../docs/integration_validation.md).
 
 Run tests from the repository root:
 

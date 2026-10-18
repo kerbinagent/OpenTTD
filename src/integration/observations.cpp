@@ -19,6 +19,7 @@
 #include "../core/utf8.hpp"
 #include "../economy_func.h"
 #include "../house.h"
+#include "../industry.h"
 #include "../landscape.h"
 #include "../landscape_cmd.h"
 #include "../linkgraph/linkgraph_type.h"
@@ -235,9 +236,15 @@ Json LandInfo(const Json &parameters)
 {
 	Parameters p(parameters);
 	TileIndex tile = p.Tile("tile");
+	AdmitWorldTextStart();
+	IndustryPresentationPsaOverlay callback_psa{nullptr, nullptr, GrfID{}};
 	TileDesc desc{};
 	desc.owner_type[0] = STR_LAND_AREA_INFORMATION_OWNER;
-	GetTileDesc(tile, desc);
+	if (IsTileType(tile, TileType::House)) {
+		GetHouseTileDescForObservation(tile, desc, callback_psa);
+	} else {
+		GetTileDesc(tile, desc);
+	}
 	Json result = SnapshotBase();
 	result["tile"] = TileCoordinates(tile);
 	result["tile_type"] = to_underlying(GetTileType(tile));
@@ -269,7 +276,13 @@ Json LandInfo(const Json &parameters)
 	}
 	CargoArray acceptance{};
 	CargoTypes always_accepted{};
-	AddAcceptedCargo(tile, acceptance, always_accepted);
+	if (IsTileType(tile, TileType::House)) {
+		AddAcceptedCargoOfHouseForObservation(tile, acceptance, always_accepted, callback_psa);
+	} else if (IsTileType(tile, TileType::Industry)) {
+		AddAcceptedCargoOfIndustryForObservation(tile, acceptance, always_accepted, callback_psa);
+	} else {
+		AddAcceptedCargo(tile, acceptance, always_accepted);
+	}
 	result["accepted_cargo"] = Json::array();
 	for (CargoType cargo : EnumRange(NUM_CARGO)) {
 		if (acceptance[cargo] == 0 && !always_accepted.Test(cargo)) continue;
@@ -278,7 +291,7 @@ Json LandInfo(const Json &parameters)
 		result["accepted_cargo"].push_back({{"cargo_id", to_underlying(cargo)},
 			{"acceptance_eighths", acceptance[cargo]}, {"always_accepted", always_accepted.Test(cargo)}});
 	}
-	result["clear_preview"] = ErrorPreview(Command<Commands::LandscapeClear>::Do(PreviewFlags<Commands::LandscapeClear>(), tile));
+	result["clear_preview"] = ErrorPreview(GetLandscapeClearCostForObservation(tile, callback_psa));
 	return Bounded(std::move(result));
 }
 

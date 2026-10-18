@@ -110,7 +110,7 @@ uint16_t GetHouseCallback(CallbackID callback, uint32_t param1, uint32_t param2,
 		bool not_yet_constructed = false, uint8_t initial_random_bits = 0, CargoTypes watched_cargo_triggers = {}, int view = 0,
 		IndustryPresentationPsaOverlay *presentation_psa = nullptr);
 
-bool CanDeleteHouse(TileIndex tile);
+bool CanDeleteHouse(TileIndex tile, IndustryPresentationPsaOverlay *presentation_psa = nullptr);
 
 bool NewHouseTileLoop(TileIndex tile);
 

@@ -606,7 +606,7 @@ void TriggerHouseAnimation_ConstructionStageChanged(TileIndex tile, bool first_c
 	}
 }
 
-bool CanDeleteHouse(TileIndex tile)
+bool CanDeleteHouse(TileIndex tile, IndustryPresentationPsaOverlay *presentation_psa)
 {
 	const HouseSpec *hs = HouseSpec::Get(GetHouseType(tile));
 
@@ -621,7 +621,11 @@ bool CanDeleteHouse(TileIndex tile)
 
 	/* Houses can be protected by a NewGRF property or a callback. The callback overrides the property. */
 	if (hs->callback_mask.Test(HouseCallbackMask::DenyDestruction)) {
-		uint16_t callback_res = GetHouseCallback(CBID_HOUSE_DENY_DESTRUCTION, 0, 0, GetHouseType(tile), Town::GetByTile(tile), tile);
+		uint16_t callback_res = GetHouseCallback(CBID_HOUSE_DENY_DESTRUCTION, 0, 0, GetHouseType(tile), Town::GetByTile(tile), tile,
+			{}, false, 0, {}, 0, presentation_psa);
+		/* Both native GRF versions use nonzero here; observations omit only
+		 * malformed-result diagnostics, retaining callback/property precedence. */
+		if (presentation_psa != nullptr) return callback_res == CALLBACK_FAILED || callback_res == 0;
 		return (callback_res == CALLBACK_FAILED || !ConvertBooleanCallback(hs->grf_prop.grffile, CBID_HOUSE_DENY_DESTRUCTION, callback_res));
 	} else {
 		return !hs->extra_flags.Test(HouseExtraFlag::BuildingIsProtected);

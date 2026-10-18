@@ -324,6 +324,9 @@ Town *TryGenerateNamedTownAroundTile(TileIndex target_tile, TownSize size, bool 
 const CargoSpec *FindFirstCargoWithTownAcceptanceEffect(TownAcceptanceEffect effect);
 CargoArray GetAcceptedCargoOfHouse(const HouseSpec *hs);
 struct IndustryPresentationPsaOverlay;
+struct TileDesc;
+void GetHouseTileDescForObservation(TileIndex tile, TileDesc &desc, IndustryPresentationPsaOverlay &presentation_psa);
+CommandCost ClearHouseForObservation(TileIndex tile, DoCommandFlags flags, IndustryPresentationPsaOverlay &presentation_psa);
 void AddAcceptedCargoOfHouseForObservation(TileIndex tile, CargoArray &acceptance, CargoTypes &always_accepted, IndustryPresentationPsaOverlay &presentation_psa);
 void AddProducedCargoOfHouseForObservation(TileIndex tile, CargoArray &produced, IndustryPresentationPsaOverlay &presentation_psa);
 

@@ -684,11 +684,11 @@ static void TileLoop_Town(TileIndex tile)
 	}
 }
 
-/** @copydoc ClearTileProc */
-static CommandCost ClearTile_Town(TileIndex tile, DoCommandFlags flags)
+/** Shared native house clearing rules; observations supply request-local callback storage. */
+static CommandCost ClearHouse(TileIndex tile, DoCommandFlags flags, IndustryPresentationPsaOverlay *presentation_psa)
 {
 	if (flags.Test(DoCommandFlag::Auto)) return CommandCost(STR_ERROR_BUILDING_MUST_BE_DEMOLISHED);
-	if (!CanDeleteHouse(tile)) return CommandCost(STR_ERROR_BUILDING_IS_PROTECTED);
+	if (!CanDeleteHouse(tile, presentation_psa)) return CommandCost(STR_ERROR_BUILDING_IS_PROTECTED);
 
 	const HouseSpec *hs = HouseSpec::Get(GetHouseType(tile));
 
@@ -717,6 +717,19 @@ static CommandCost ClearTile_Town(TileIndex tile, DoCommandFlags flags)
 	}
 
 	return cost;
+}
+
+/** @copydoc ClearTileProc */
+static CommandCost ClearTile_Town(TileIndex tile, DoCommandFlags flags)
+{
+	return ClearHouse(tile, flags, nullptr);
+}
+
+/** Native observation dispatch only; the caller retains the command test lifecycle. */
+CommandCost ClearHouseForObservation(TileIndex tile, DoCommandFlags flags, IndustryPresentationPsaOverlay &presentation_psa)
+{
+	if (!flags.Test(DoCommandFlag::QueryCost) || flags.Test(DoCommandFlag::Execute)) return CMD_ERROR;
+	return ClearHouse(tile, flags, &presentation_psa);
 }
 
 /** @copydoc AddProducedCargoProc */
@@ -852,8 +865,8 @@ CargoArray GetAcceptedCargoOfHouse(const HouseSpec *hs)
 	return acceptance;
 }
 
-/** @copydoc GetTileDescProc */
-static void GetTileDesc_Town(TileIndex tile, TileDesc &td)
+/** Shared native house description; no live callback storage writes during observation. */
+static void GetHouseTileDesc(TileIndex tile, TileDesc &td, IndustryPresentationPsaOverlay *presentation_psa)
 {
 	const HouseID house = GetHouseType(tile);
 	const HouseSpec *hs = HouseSpec::Get(house);
@@ -867,13 +880,14 @@ static void GetTileDesc_Town(TileIndex tile, TileDesc &td)
 	td.town_can_upgrade = !IsHousePlayerProtected(tile) && !hs->extra_flags.Test(HouseExtraFlag::BuildingIsProtected);
 
 	std::array<int32_t, 1> regs100;
-	uint16_t callback_res = GetHouseCallback(CBID_HOUSE_CUSTOM_NAME, house_completed ? 1 : 0, 0, house, Town::GetByTile(tile), tile, regs100);
+	uint16_t callback_res = GetHouseCallback(CBID_HOUSE_CUSTOM_NAME, house_completed ? 1 : 0, 0, house, Town::GetByTile(tile), tile,
+		regs100, false, 0, {}, 0, presentation_psa);
 	if (callback_res != CALLBACK_FAILED && callback_res != 0x400) {
 		StringID new_name = STR_NULL;
 		if (callback_res == 0x40F) {
 			new_name = GetGRFStringID(hs->grf_prop.grfid, static_cast<GRFStringID>(regs100[0]));
 		} else if (callback_res > 0x400) {
-			ErrorUnknownCallbackResult(hs->grf_prop.grfid, CBID_HOUSE_CUSTOM_NAME, callback_res);
+			if (presentation_psa == nullptr) ErrorUnknownCallbackResult(hs->grf_prop.grfid, CBID_HOUSE_CUSTOM_NAME, callback_res);
 		} else {
 			new_name = GetGRFStringID(hs->grf_prop.grfid, GRFSTR_MISC_GRF_TEXT + callback_res);
 		}
@@ -893,6 +907,17 @@ static void GetTileDesc_Town(TileIndex tile, TileDesc &td)
 	}
 
 	td.owner[0] = OWNER_TOWN;
+}
+
+/** @copydoc GetTileDescProc */
+static void GetTileDesc_Town(TileIndex tile, TileDesc &td)
+{
+	GetHouseTileDesc(tile, td, nullptr);
+}
+
+void GetHouseTileDescForObservation(TileIndex tile, TileDesc &td, IndustryPresentationPsaOverlay &presentation_psa)
+{
+	GetHouseTileDesc(tile, td, &presentation_psa);
 }
 
 static bool GrowTown(Town *t, TownExpandModes modes);

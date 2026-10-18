@@ -15,7 +15,7 @@ class CatalogTest(unittest.TestCase):
     def test_compact_engine_capabilities_match_catalog_identity(self):
         self.assertEqual(CATALOG_HASH_ALGORITHM, "blake2b-256")
         self.assertEqual(CATALOG_HASH,
-                         "0652cacfe54fd836b41803610e2dd986c324076f7faf3395a820f9bfbe0b0369")
+                         "083a13031161b652d3892f756d1dc5a097f8b1991383174a075ce2fa09ff85a3")
         capabilities = {key: copy.deepcopy(value) for key, value in CATALOG.items()
                         if key not in ("actions", "queries")}
         capabilities.update(actions=list(CATALOG_ACTION_NAMES), queries=list(CATALOG_QUERY_NAMES),
@@ -54,6 +54,15 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(sum(spec["modes"] == ["text", "visual"] for spec in CATALOG["actions"]), 103)
         self.assertIsNone(action_spec("tool.apply"))
         self.assertIsNone(query_spec("raw.command"))
+
+    def test_land_info_uses_shared_expensive_observation_admission(self):
+        self.assertEqual(CATALOG["limits"]["land_info_interval_ms"], 1000)
+        self.assertIn("land information",
+                      CATALOG["conventions"]["observation_intervals"])
+        convention = CATALOG["conventions"]["land_info"]
+        self.assertIn("query-local callback PSA writes", convention)
+        self.assertIn("no funds are checked or reserved", convention)
+        self.assertEqual(query_spec("land.info")["modes"], ["text"])
 
     def test_decision_estimate_and_station_site_actual_catalog_contract(self):
         expected_queries = {
