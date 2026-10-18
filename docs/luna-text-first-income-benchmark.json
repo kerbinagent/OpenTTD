@@ -1,0 +1,134 @@
+{
+  "capture_working_upper_target_seconds": 291,
+  "concurrency": "two benchmark worlds plus root 512 world06 and web compile/QA",
+  "date": "2026-10-18",
+  "format_version": 1,
+  "guide_sha256": "48e43232bc3280988de6ee19c7d4e70a13de512482f8f43e6efdd79e31acac2a",
+  "interpretation": "sampled evidence; not exact payment time, actor awareness, profitability, causal documentation effect or measured capture performance",
+  "metric": "first independently observed report with positive transport gross and delivered cargo",
+  "native_binary_sha256": "eada3a7bbe726c1feeeba7f8bbc317d410841ea2176d1b91da1efa45eb013db1",
+  "native_linked_revision": "e386adfdfa per lead",
+  "pre_start_setup_failure_recorded": true,
+  "raw_model_reasoning_or_credentials_exported": false,
+  "runs": [
+    {
+      "actor_public_io_elapsed_wall_seconds": {
+        "first_positive_actor_report": 156.904053,
+        "first_successful_build": 75.247222,
+        "first_vehicle_start": 101.784367,
+        "join_verified": 28.235901
+      },
+      "admitted_rejected": 1,
+      "baseline_to_start_seconds": 29.32041531521827,
+      "binding_continuity_verified": true,
+      "capture_target_seconds": [
+        217.52646803681273,
+        290.0352907157503
+      ],
+      "client_zip_bytes": 364064,
+      "client_zip_sha256": "12e02c6ea66617c5c14bfbab698a72b941f46420c4d1961f558ecb81671f4434",
+      "company_id": 0,
+      "completed": 11,
+      "conservative_bracket_seconds": [
+        140.00023619597778,
+        145.01764535787515
+      ],
+      "crash_restart_durability_tested": false,
+      "first_independent_witness": {
+        "delivered_cargo": 14,
+        "elapsed_monotonic": 145.01764535787515,
+        "line": 21,
+        "received_utc": 1792348987.3348527,
+        "source": "observations.jsonl",
+        "started_utc": 1792348987.3174489,
+        "tick": 10714,
+        "transport_gross": 9
+      },
+      "first_sampler_request_elapsed_seconds": 49.12255362281576,
+      "gameplay_attempt_ids": 12,
+      "observed_ready_to_start_seconds": 30.50234341621399,
+      "observed_terminal_unknown": 0,
+      "planned_hard_cutoff_utc": 1792350642.3172014,
+      "post_income_change": "second vehicle added, ordered, started, later moving with passengers and continued company income",
+      "profitability_established": false,
+      "query_count": 53,
+      "query_failures": 0,
+      "raw_operator_file_digests": {
+        "baseline": "003b632e95f321b2de931a975bbeee31f9dd931d6e88285b67a7e5bf1d7672f0",
+        "observations": "a70612d27165074816f2df05280d183cb62f306dcb5eb5e31cb184c9244f96e2"
+      },
+      "run": 1,
+      "start_iso": "2026-10-18T18:40:42.317201+00:00",
+      "start_utc": 1792348842.3172014,
+      "status": "observed",
+      "world_id": "text-first-income-01",
+      "zero_native_baseline_verified": true
+    },
+    {
+      "actor_public_io_elapsed_wall_seconds": {
+        "first_positive_actor_report": 147.136488,
+        "first_successful_build": 73.447511,
+        "first_vehicle_start": 92.581154,
+        "join_verified": 25.635493
+      },
+      "admitted_rejected": 1,
+      "baseline_to_start_seconds": 50.21403433778323,
+      "binding_continuity_verified": true,
+      "capture_target_seconds": [
+        217.53532229410484,
+        290.0470963921398
+      ],
+      "client_zip_bytes": 364064,
+      "client_zip_sha256": "12e02c6ea66617c5c14bfbab698a72b941f46420c4d1961f558ecb81671f4434",
+      "company_id": 2,
+      "completed": 11,
+      "conservative_bracket_seconds": [
+        140.00032828119583,
+        145.0235481960699
+      ],
+      "crash_restart_durability_tested": false,
+      "first_independent_witness": {
+        "delivered_cargo": 25,
+        "elapsed_monotonic": 145.0235481960699,
+        "line": 19,
+        "received_utc": 1792349011.5933807,
+        "source": "observations.jsonl",
+        "started_utc": 1792349011.5700731,
+        "tick": 11263,
+        "transport_gross": 55
+      },
+      "first_sampler_request_elapsed_seconds": 55.46518764318898,
+      "gameplay_attempt_ids": 12,
+      "observed_ready_to_start_seconds": 54.712300300598145,
+      "observed_terminal_unknown": 0,
+      "planned_hard_cutoff_utc": 1792350666.5698283,
+      "post_income_change": "second vehicle added, ordered, started, later moving with passengers and continued company income",
+      "profitability_established": false,
+      "query_count": 46,
+      "query_failures": 0,
+      "raw_operator_file_digests": {
+        "baseline": "39a510d5849d37780b4da2b49e6f31edf26639a7dac211fcad20e52869f191b6",
+        "observations": "249f0e8614123614f31718c74e4723c127c804e8ca4b80b17e7e0ff765c3d4f6"
+      },
+      "run": 2,
+      "start_iso": "2026-10-18T18:41:06.569828+00:00",
+      "start_utc": 1792348866.5698283,
+      "status": "observed",
+      "world_id": "text-first-income-02",
+      "zero_native_baseline_verified": true
+    }
+  ],
+  "sampler_period_seconds": 5,
+  "source_commit": "9133befaa0b947d52b619c9d3a5d52240a4dff7b",
+  "worlds": {
+    "active_players_per_world": 1,
+    "effort_level": "unknown",
+    "fork_turns": "none",
+    "landscape": "temperate",
+    "map_size": 128,
+    "profile": "luna",
+    "requested_model": "gpt-6-luna",
+    "seed": 20261018,
+    "starting_year": 1950
+  }
+}
