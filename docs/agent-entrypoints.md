@@ -101,5 +101,9 @@ The subsequent [Luna trial](luna-trial-05.md) exposed ambiguous pause wording:
 `pause.command_policy` applies only while `pause.paused` is true. The guides and
 schema now state this explicitly, with an unpaused `no_construction` example.
 Independent native-source review and a fresh Luna comprehension check passed.
-The running trial received the same protocol clarification for all companies;
-its unaided URL-only business result remains qualified.
+The trial received the same protocol clarification for all companies and ended
+early at the user's request. Both text companies earned transport income;
+neither capture company did. Its unaided URL-only business result remains
+qualified. The [joint improvement proposal](luna-trial-05-improvements.md)
+prioritizes fresh desktop observations and useful native rejection feedback;
+those changes await user review.
