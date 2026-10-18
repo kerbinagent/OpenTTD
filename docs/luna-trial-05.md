@@ -66,9 +66,10 @@ Both coordinators were asked to give all four players the same neutral protocol
 clarification: the configured policy does not block unpaused construction; read
 current status and use normal native checks. No world setting, route, funding,
 budget or cutoff changed. The original URL-only unaided interpretation gate is
-therefore **qualified**, even if later business operation succeeds. Guide/schema
-wording is being corrected for subsequent fresh sessions; this trial retains its
-original frozen assets and the assistance record.
+therefore **qualified**, even if later business operation succeeds. The corrected
+guide/schema wording and its review are described in
+[entrypoint validation](agent-entrypoints.md). This trial retains its original
+frozen assets and the assistance record.
 
 ## Thirty-minute checkpoint
 
@@ -96,3 +97,42 @@ one API path; broader native/UI isolation is not inferred from it.
 
 Evidence: `progress-30min.json` and `private-thread-isolation.json` under the
 local evidence root. The trial continues toward its original maximum cutoff.
+
+## Sixty-minute checkpoint
+
+Cycle 120 completed at 17:24:44–17:24:47 UTC. All 484 scheduled reads through
+that round succeeded, with the same native engine instance. These non-atomic
+reports retain the following quarterly transport totals; they are not net profit:
+
+| Company | Transport income | Delivered cargo units |
+| --- | ---: | ---: |
+| 0, text competitor | 17,145 | 2,260 |
+| 1, capture competitor | 0 | 0 |
+| 2, text cooperator | 5,734 | 2,630 |
+| 3, capture cooperator | 0 | 0 |
+
+The original cutoff and budgets remain unchanged. Evidence:
+`progress-60min.json`.
+
+## Perception and supervision qualifications
+
+The capture cooperator reported receiving partner message
+`e2c54fc6-336c-458d-b18c-49b89e6edf70` containing structured text-map data.
+It said it did not use those data for an action and requested image-grounded
+descriptions instead. That non-use is a player claim, not independently proved
+absence of influence. The record remains explicit in
+`capture-chat-qualification.json`; ordinary voluntary in-game advice remains
+part of the communication test.
+
+At approximately 17:25 UTC, the peer reported that the capture competitor ended
+its neutral status turn with a final answer. The peer reports resuming the same
+actor with the original objective, state, deadline and budget. This was turn
+supervision, with no reported strategic advice, new actor, reset or time extension. Evidence:
+`supervision-events.jsonl`.
+
+An independently reviewed image extractor now requires bounded full image
+decoding and deduplicates identical recorded output events. Its earlier
+header-only sample is superseded. The 17:20:41 UTC capture-cooperator sample
+contains 126 verified host-image events, 125 distinct images, all exact native
+PNG matches. This establishes delivery to the model host, not interpretation or
+a successful business; the final pre-cutoff count remains pending.
