@@ -91,10 +91,12 @@ def _stored_native_offset(value):
 class Service:
     """One backend/database/socket per world; a proxy hosts independent stacks."""
 
-    def __init__(self, store, engine, social=None, autostart=True, world_id=None, renderer=None, checkpoint_interval=30):
+    def __init__(self, store, engine, social=None, autostart=True, world_id=None, renderer=None, checkpoint_interval=30,
+                 admission=None):
         self.store = store
         self.engine = engine
         self.renderer = renderer
+        self.admission = admission
         self.social = social or Social(store)
         self.world_id = world_id
         if world_id is not None:
@@ -360,6 +362,12 @@ class Service:
         return self.events(token, after)
 
     def handle(self, method, path, token, body=None, query=None):
+        if method == "POST" and path == "/v1/agent/join":
+            if query:
+                raise ServiceError("invalid_request")
+            if self.admission is None:
+                raise ServiceError("join_disabled", status=403)
+            return 200, self.admission.join(token, body, self)
         principal = self._authorize(token)
         body, query = ({} if body is None else body), ({} if query is None else query)
         parts = [unquote(part) for part in path.strip("/").split("/")]

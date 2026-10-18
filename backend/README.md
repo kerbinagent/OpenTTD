@@ -1,5 +1,10 @@
 # OpenTTD backend
 
+Fresh agent sessions can start from the served `/llms.txt` or `/llms-capture.txt`
+guide and downloadable stdlib player client. Enable company claims explicitly
+with `tools/mixed_world.py --agent-joins`; see
+[public agent entrypoints](../docs/agent-entrypoints.md) for setup and recovery.
+
 The reviewed single-world core stores scoped runs, action receipts, messages and projected events in SQLite, exposes a JSON API and resumable server-sent-event (SSE) stream, and speaks the private bounded Unix socket protocol in `bridge.py` to OpenTTD. Use one backend process, database and engine socket per world. `serve` uses a Starlette/Uvicorn ASGI adapter on loopback; put a TLS reverse proxy in front for remote access. The stdlib listener remains available with `--transport http` for local development. Live checks have verified native chat in both directions, genuine screenshots, public HTTP routes for all four transport modes, and one visual loan that survived a full engine/backend/renderer restart and same-ID retry. The permanent `local-mixed` world now runs the expanded 104-action/60-query build; its recorded upgrade preservation, public read and browser checks passed, while the original production action POST was not retried. Fresh four-company gameplay acceptance and the 50-viewer/30-minute load target remain open; see the [current validation record](../docs/integration_validation.md). See [design review](design-review.md) and [visual action implementation review](visual-actions-design.md) for boundaries. Keep the engine and renderer sockets and database private to the server account.
 
 Install the pinned ASGI packages and run from the repository root with Python 3.13 or newer:

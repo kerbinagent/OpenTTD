@@ -102,6 +102,28 @@ def write_new(path: Path, text: str):
         os.fsync(target.fileno())
 
 
+def agent_join_pool(state: Path, args, manifest):
+    """Publish only the operator-selected agent runs; never rotate their tokens."""
+    if not args.agent_joins:
+        return None
+    value = {"version": 1, "world_id": args.world, "world_epoch": manifest["world_epoch"],
+             "runs": {manifest["runs"][role]["run_id"]: {
+                 "token_file": str(state / "credentials" / f"{role}.token")}
+                 for role, binding in args.roles.items() if binding["kind"] == "agent"}}
+    path = state / "agent-join-pool.json"
+    if path.exists():
+        if json.loads(private_file(path)) != value:
+            raise StartupError("Existing agent join pool differs from the stable run bindings")
+    else:
+        write_new(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
+        descriptor = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    return path
+
+
 def publish_manifest(state: Path, manifest):
     temporary = state / "manifest.json.new"
     write_new(temporary, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -340,10 +362,14 @@ class Stack:
                 raise StartupError("Existing renderer map does not match the stable run bindings")
         else:
             write_new(renderer_config, json.dumps(config, indent=2) + "\n")
-        self.spawn("backend", [sys.executable, "-m", "backend", "serve", "--database", str(self.state / "world.sqlite3"),
+        join_pool = agent_join_pool(self.state, self.args, self.manifest)
+        backend_command = [sys.executable, "-m", "backend", "serve", "--database", str(self.state / "world.sqlite3"),
                                "--world", self.args.world, "--engine-socket", str(self.state / "ipc" / "engine.sock"),
                                "--renderer-config", str(renderer_config), "--transport", self.args.transport,
-                               "--host", "127.0.0.1", "--port", str(self.args.http_port)], environment=self.environment("engine"))
+                               "--host", "127.0.0.1", "--port", str(self.args.http_port)]
+        if join_pool is not None:
+            backend_command += ["--agent-join-pool", str(join_pool)]
+        self.spawn("backend", backend_command, environment=self.environment("engine"))
         self.wait("backend-owned recovery", lambda: not self.rpc("checkpoint.status").get("result", {}).get("recovery_required", True))
         for company in sorted(binding["company_id"] for binding in self.roles.values()):
             self.wait(f"company {company + 1}", lambda company=company: self.rpc("company.ensure", company_id=company, create=save is None).get("status") == "completed")
@@ -416,6 +442,9 @@ class Stack:
 
     def serve(self):
         print(f"\nWorld ready: http://127.0.0.1:{self.args.http_port}/", flush=True)
+        if self.args.agent_joins:
+            print(f"Agent play: http://127.0.0.1:{self.args.http_port}/llms.txt (text) or /llms-capture.txt (images)")
+            print("Public joins claim one available agent company; use a separate private client state directory per player.")
         print("Session tokens are in private files; their contents are never printed:")
         for role in self.roles:
             print(f"  {role}: {self.state / 'credentials' / (role + '.token')}")
@@ -497,6 +526,8 @@ def parse_args(argv=None):
     parser.add_argument("--native-port", type=port, default=3979)
     parser.add_argument("--http-port", type=port, default=8080)
     parser.add_argument("--transport", choices=("asgi", "http"), default="asgi", help="ASGI (default) or explicit local-development HTTP fallback")
+    parser.add_argument("--agent-joins", action="store_true",
+                        help="allow URL-only public claims of this profile's preprovisioned agent companies")
     parser.add_argument("--graphics", default="OpenGFX", help="installed base graphics name")
     parser.add_argument("--map-size", type=int, choices=(128, 256, 512, 1024),
                         help="new square map size; default 512 for mixed/overnight, 128 for luna")

@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+from .agent_assets import build_agent_assets
 from .errors import ServiceError
 from .observations import FUTURE_SKEW_MS, RETENTION_MS, ObservationImage
 from .renderer import _png_dimensions
@@ -154,6 +155,7 @@ class BackendHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, address: tuple[str, int], service: object):
         self.service = service
+        self.agent_assets = build_agent_assets()
         self._handler_slots = threading.BoundedSemaphore(MAX_HANDLERS)
         self.stream_slots = threading.BoundedSemaphore(MAX_STREAMS)
         self.capture_slots = threading.BoundedSemaphore(CAPTURE_SLOTS)
@@ -217,6 +219,12 @@ class BackendHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         self._dispatch("OPTIONS")
 
+    def do_TRACE(self) -> None:
+        self._dispatch("TRACE")
+
+    def do_CONNECT(self) -> None:
+        self._dispatch("CONNECT")
+
     def _json_response(self, status: int, payload: dict) -> None:
         try:
             data = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
@@ -249,7 +257,8 @@ class BackendHandler(BaseHTTPRequestHandler):
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(data)
+        if self.command != "HEAD":
+            self.wfile.write(data)
         self.close_connection = True
 
     def _static(self, path: str) -> None:
@@ -315,18 +324,35 @@ class BackendHandler(BaseHTTPRequestHandler):
     def _dispatch(self, method: str) -> None:
         capture_admitted = False
         try:
-            if len(self.path) > MAX_TARGET:
+            # BaseHTTPRequestHandler normalizes a leading "//", and urlsplit
+            # strips some leading controls. Validate the original target before
+            # either spelling can become an exact unauthenticated asset route.
+            target = self.requestline.split()[1]
+            if (not target.startswith("/") or
+                    any(ord(char) < 0x20 or ord(char) == 0x7f for char in self.requestline)):
+                raise _RequestError(400, "invalid_request", "Invalid request target")
+            if len(target) > MAX_TARGET:
                 raise _RequestError(414, "uri_too_long", "Request target is too long")
-            if method == "GET" and self.path in _STATIC:
-                self._static(self.path)
-                return
-            token = self._token()
             try:
                 split = urlsplit(self.path)
             except ValueError:
                 raise _RequestError(400, "invalid_request", "Invalid request target") from None
-            if split.scheme or split.netloc or split.fragment or not split.path.startswith("/"):
+            if split.scheme or split.netloc or "#" in target or not split.path.startswith("/"):
                 raise _RequestError(400, "invalid_request", "Invalid request target")
+            asset_path = target.partition("?")[0]
+            if asset_path in self.server.agent_assets:
+                if split.query:
+                    raise _RequestError(400, "invalid_query", "Agent asset query is unsupported")
+                if method not in ("GET", "HEAD"):
+                    raise _RequestError(405, "method_not_allowed", "Agent assets support GET and HEAD")
+                self._body(method)
+                data, content_type = self.server.agent_assets[asset_path]
+                self._bytes_response(200, data, content_type, "no-cache")
+                return
+            if method == "GET" and self.path in _STATIC:
+                self._static(self.path)
+                return
+            token = self._token()
             try:
                 entries = parse_qsl(split.query, keep_blank_values=True, max_num_fields=64)
             except ValueError:

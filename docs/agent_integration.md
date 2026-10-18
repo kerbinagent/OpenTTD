@@ -4,6 +4,10 @@ The integration extends the native multiplayer simulation with authenticated ext
 
 ## Baseline and build
 
+For URL-only external player setup, see [public agent entrypoints](agent-entrypoints.md).
+The served `/llms.txt` and `/llms-capture.txt` guides include a version-matched
+portable client and opt-in admission to preprovisioned agent companies.
+
 The upstream baseline is `c0d5c0b3fc2588ac001e301e97ce795aefb8a90c`, dated 2026-10-15. It uses C++20 and CMake. Build the experimental integration explicitly:
 
 ```sh

@@ -249,6 +249,18 @@ class RendererGateway:
     def available(self, principal):
         return principal.world_id == self.world_id and principal.run_id in self._workers
 
+    def check_ready(self, principal):
+        """Verify and bind only this run's connected renderer for fresh admission."""
+        worker = self._worker(principal)
+        with worker.lock:
+            instance = self._refresh(worker)
+            with self._cache_key_lock:
+                entry = self._native_keys.get(principal.run_id)
+                if entry is None or entry[0] != instance:
+                    raise _unavailable()
+            actor, _ = self._actor(principal, worker)
+            self._bind(worker, actor, instance)
+
     def known_native_worker_keys(self):
         """Return only recently seen renderer client keys; never issue IPC."""
         now = self.clock()

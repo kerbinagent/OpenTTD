@@ -18,6 +18,7 @@ from starlette.requests import ClientDisconnect, Request
 from starlette.responses import Response
 from starlette.routing import Route
 
+from .agent_assets import build_agent_assets
 from .errors import ServiceError
 from .http import (
     CAPTURE_SLOTS, HEARTBEAT_INTERVAL, MAX_BODY, MAX_IMAGE, MAX_TARGET, STREAM_LIFETIME,
@@ -283,6 +284,7 @@ def create_app(service: object, web_root=None) -> Starlette:
     """Build a transport-only app; the caller owns Service and gateway lifecycle."""
     root = _WEB_ROOT if web_root is None else web_root
     assets = {path: read_static(path, root) for path in _STATIC}
+    agent_assets = build_agent_assets()
     api_slots = _Admission(API_SLOTS)
     image_slots = _Admission(IMAGE_SLOTS)
     capture_slots = _Admission(CAPTURE_SLOTS)
@@ -296,6 +298,22 @@ def create_app(service: object, web_root=None) -> Starlette:
         slots = None
         try:
             raw_path = request.scope.get("raw_path", b"")
+            agent_path = next((path for path in agent_assets if raw_path == path.encode("ascii")), None)
+            if agent_path is not None:
+                _, query = _path_and_query(request)
+                if query or request.scope.get("query_string"):
+                    raise _Problem(400, "invalid_query", "Agent asset query is unsupported")
+                if request.method not in ("GET", "HEAD"):
+                    raise _Problem(405, "method_not_allowed", "Agent assets support GET and HEAD")
+                if _header_values(request, b"transfer-encoding"):
+                    raise _Problem(400, "invalid_request", "Transfer encoding is unsupported")
+                await _body(request)
+                data, content_type = agent_assets[agent_path]
+                return Response(b"" if request.method == "HEAD" else data, headers={
+                    "Content-Type": content_type, "Cache-Control": "no-cache",
+                    "Content-Length": str(len(data)),
+                    "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
+                })
             public_path = next((path for path in assets if raw_path == path.encode("ascii")), None)
             if request.method == "GET" and public_path is not None and not request.scope.get("query_string"):
                 data, content_type = assets[public_path]

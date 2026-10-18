@@ -115,6 +115,14 @@ class Store:
                     token_hash TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL UNIQUE REFERENCES runs(id)
                 );
+                CREATE TABLE IF NOT EXISTS agent_join_claims (
+                    world_id TEXT NOT NULL REFERENCES worlds(id),
+                    claim_hash TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (world_id, claim_hash)
+                );
                 CREATE TABLE IF NOT EXISTS action_requests (
                     world_id TEXT NOT NULL,
                     identity_id TEXT NOT NULL,
@@ -366,6 +374,64 @@ class Store:
                 (hashlib.sha256(token.encode()).hexdigest(), principal.run_id),
             )
         return token
+
+    def credential_matches(self, principal: Principal, token_hash: str, *, active=True) -> bool:
+        """Check a trusted operator token binding without returning its credential."""
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT r.*,m.active AS membership_active FROM credentials c JOIN runs r ON r.id=c.run_id "
+                "JOIN memberships m ON (m.world_id=r.world_id AND m.identity_id=r.identity_id "
+                "AND m.company_id=r.company_id) WHERE c.token_hash=? AND r.id=?",
+                (token_hash, principal.run_id),
+            ).fetchone()
+        return (row is not None and self._principal(row) == principal
+                and (not active or (row["active"] == 1 and row["membership_active"] == 1)))
+
+    def agent_join_claim(self, world_id: str, claim_hash: str) -> dict[str, Any] | None:
+        self._ensure_world(world_id)
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT mode,run_id FROM agent_join_claims WHERE world_id=? AND claim_hash=?",
+                (world_id, claim_hash),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def agent_join_claimed_runs(self, world_id: str) -> set[str]:
+        self._ensure_world(world_id)
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT run_id FROM agent_join_claims WHERE world_id=?", (world_id,),
+            ).fetchall()
+        return {row["run_id"] for row in rows}
+
+    def claim_agent_join(self, world_id: str, world_epoch: str, claim_hash: str, mode: str,
+                         principal: Principal, token_hash: str, engine_instance_id: str) -> dict[str, Any]:
+        """Commit one prepared slot; no native RPC or token material enters this transaction."""
+        self._ensure_world(world_id)
+        with self._transaction() as db:
+            existing = db.execute(
+                "SELECT mode,run_id FROM agent_join_claims WHERE world_id=? AND claim_hash=?",
+                (world_id, claim_hash),
+            ).fetchone()
+            if existing is not None:
+                if existing["mode"] != mode:
+                    raise ServiceError("join_conflict", status=409)
+                return dict(existing)
+            world = db.execute(
+                "SELECT epoch,recovery_state,engine_instance_id FROM worlds WHERE id=?", (world_id,),
+            ).fetchone()
+            if (world is None or world["epoch"] != world_epoch or world["recovery_state"] != "ready"
+                    or world["engine_instance_id"] not in (None, engine_instance_id)):
+                raise ServiceError("world_recovering", status=503)
+            if (principal.world_id != world_id or principal.mode != mode or principal.kind != "agent"
+                    or not self.credential_matches(principal, token_hash)):
+                raise ServiceError("join_not_ready", status=503)
+            if db.execute("SELECT 1 FROM agent_join_claims WHERE run_id=?", (principal.run_id,)).fetchone():
+                # A second backend process may have claimed this slot after preparation.
+                raise ServiceError("join_not_ready", status=503)
+            db.execute("INSERT INTO agent_join_claims VALUES(?,?,?,?,?)",
+                       (world_id, claim_hash, mode, principal.run_id, time.time()))
+        return {"mode": mode, "run_id": principal.run_id}
 
     def get_principal(self, run_id: str) -> Principal | None:
         """Read a run's immutable identity, including after membership revocation."""

@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from .json_tools import loads
+from .errors import ServiceError
 
 
 def _company(value: str) -> int:
@@ -111,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--renderer-run", help="run ID served by the renderer")
     serve.add_argument("--renderer-artifacts", help="trusted renderer PNG artifact directory")
     serve.add_argument("--renderer-config", help="private JSON map of renderer runs")
+    serve.add_argument("--agent-join-pool", help="opt-in private map of preprovisioned companies available to public agent joins")
     serve.add_argument("--transport", choices=("asgi", "http"), default="asgi",
                        help="ASGI production adapter (default) or local-development HTTP")
     serve.add_argument("--max-pending-company", type=_bounded_decimal("company limit", 1, 128), default=64)
@@ -236,7 +238,15 @@ def main(argv: list[str] | None = None) -> int:
                     world_epoch=store.world_epoch(args.world),
                     capture_interval=args.capture_interval if args.capture_interval is not None else 1.0,
                 )
-            service = Service(store, UnixEngine(args.engine_socket), world_id=args.world, renderer=renderer)
+            admission = None
+            if args.agent_join_pool:
+                from .admission import AgentAdmission
+                try:
+                    admission = AgentAdmission.from_file(args.agent_join_pool, store, args.world, renderer)
+                except (OSError, ValueError, ServiceError) as exc:
+                    parser.error(f"Invalid agent join pool: {exc}")
+            service = Service(store, UnixEngine(args.engine_socket), world_id=args.world,
+                              renderer=renderer, admission=admission)
             try:
                 if args.transport == "http":
                     from .http import create_server

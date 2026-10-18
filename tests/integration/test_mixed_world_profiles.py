@@ -117,6 +117,28 @@ class OvernightProfileTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.arguments("overnight", "--initial-save", str(initial))
 
+    def test_agent_join_pool_is_opt_in_agent_only_and_restart_stable(self):
+        args = self.arguments("mixed")
+        manifest = self.provision(args)
+        self.assertIsNone(mixed_world.agent_join_pool(self.state, args, manifest))
+        self.assertFalse((self.state / "agent-join-pool.json").exists())
+        credentials = {path.name: path.read_bytes() for path in (self.state / "credentials").iterdir()}
+        args.agent_joins = True
+        path = mixed_world.agent_join_pool(self.state, args, manifest)
+        first = path.read_bytes()
+        value = json.loads(first)
+        self.assertEqual(value["world_epoch"], manifest["world_epoch"])
+        self.assertEqual(set(value["runs"]), {manifest["runs"][role]["run_id"]
+            for role in ("text-agent", "visual-agent")})
+        self.assertNotIn(manifest["runs"]["human"]["run_id"], value["runs"])
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(mixed_world.agent_join_pool(self.state, args, manifest), path)
+        self.assertEqual(path.read_bytes(), first)
+        self.assertEqual({p.name: p.read_bytes() for p in (self.state / "credentials").iterdir()}, credentials)
+        changed = {**manifest, "world_epoch": "other-world-incarnation"}
+        with self.assertRaises(mixed_world.StartupError):
+            mixed_world.agent_join_pool(self.state, args, changed)
+
 
 if __name__ == "__main__":
     unittest.main()

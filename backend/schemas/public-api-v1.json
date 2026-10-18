@@ -4,6 +4,28 @@
   "title": "OpenTTD backend public API v1 JSON envelopes",
   "description": "Documentation of public JSON bodies. Authorization, mode, current engine capabilities, ownership, image freshness, and canonical gameplay parameters are enforced at runtime. Binary PNG and SSE framing are outside this schema.",
   "$defs": {
+    "agentJoinRequest": {
+      "description": "POST /v1/agent/join, only when operator-enabled. Authorization carries a durably saved, client-generated canonical base64url 32-byte claim secret. Exact secret/body replay recovers the same slot; this is not a gameplay action.",
+      "type": "object",
+      "properties": {"mode": {"enum": ["text", "visual"]}},
+      "required": ["mode"],
+      "additionalProperties": false
+    },
+    "agentJoinReply": {
+      "description": "Private no-store reply. Persist token privately; never print or log this body. The starter client prints only the non-secret company binding.",
+      "type": "object",
+      "properties": {
+        "api_version": {"const": "v1"},
+        "world_id": {"type": "string", "minLength": 1},
+        "company_id": {"$ref": "#/$defs/companyId"},
+        "identity_id": {"type": "string", "minLength": 1},
+        "run_id": {"$ref": "#/$defs/identifier"},
+        "mode": {"enum": ["text", "visual"]},
+        "token": {"type": "string", "minLength": 1, "maxLength": 256}
+      },
+      "required": ["api_version", "world_id", "company_id", "identity_id", "run_id", "mode", "token"],
+      "additionalProperties": false
+    },
     "identifier": {
       "type": "string",
       "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
