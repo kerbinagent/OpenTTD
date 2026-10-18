@@ -139,3 +139,22 @@ adapter protocol/recovery behavior. These review boundaries do not replace
 isolated live rendering checks, latency measurements or fresh Luna gameplay
 acceptance. Broad panel coverage, multi-view desktop multiplexing, automatic
 semantic navigation and image batches remain later design decisions.
+
+## Automatic depot facing: architecture review, 2026-10-18
+
+Independent architecture and correctness reviews approved the public/internal
+design before implementation. The extension stays on the two existing depot
+actions: explicit integer direction remains available and the caller can opt into
+`"auto"` at its chosen site/type. A bounded four-neighbor native legality check
+selects only a unique facing. A local dependency snapshot freezes that choice
+without adding a planner, strategic scoring, another endpoint or an execution
+ledger. Both RNG streams are restored around candidate tests.
+
+The design deliberately keeps reciprocal connectors separate: GUI connection
+callbacks post additional commands with their own costs and failure outcomes.
+Adding those callbacks would change this one-command action into a composite
+operation. The [depot contract](../docs/depot-placement.md) states the facing-only
+limit, inaccessible foreign-rail exclusion and ambiguity behavior. Independent
+POST reviews approved the actual implementation after correcting estimate-error
+projection and public response-schema omissions. Compiled native, public HTTP and
+capture-composition evidence is recorded in the validation ledger.

@@ -29,6 +29,7 @@ if(OPTION_INTEGRATION)
         test_integration_ledger.cpp
         test_integration_visual_targets.cpp
         test_integration_construction.cpp
+        test_integration_depot_direction.cpp
         test_integration_management.cpp
         test_integration_company_settings_registry.cpp
         test_integration_company_settings_gui.cpp

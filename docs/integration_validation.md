@@ -111,7 +111,7 @@ depot-direction change. Evidence and source hashes are collected in
 | Backend suite | 380 discovered: 379 passed, one optional JSON Schema dependency skip; that schema case passed separately under the system Python with the dependency installed |
 | Public player journal recovery | Three cases passed, including a lost completed reply, exact original references and Boolean/integer conflicts |
 | Public selected-capture fixture | Fresh 256-square world: map center/zoom/image-point, exact retries/conflicts, finance layouts, directory sorting/scrolling, causal rename and input-proof separation passed |
-| Forced renderer lag | An old native interaction lease held replay back; a new after-action read returned `replica_pending` 74 times, then the identical request succeeded after natural expiry at 40.68 seconds; the full fixture took 40.78 seconds |
+| Forced renderer lag | An old native interaction lease held replay back; a new after-action read returned `replica_pending` 74 times, then the identical request succeeded after natural expiry; the full fixture including finance confirmation took 40.78 seconds |
 
 The standard public fixture received 13 PNG responses through 16 selected POST
 attempts, including one exact retry, one expected busy response, an identity
@@ -172,6 +172,75 @@ business acceptance. Full semantic parity, economic success for capture players,
 broader native-panel coverage and long-running stability of this new snapshot
 remain open. The earlier overnight world was cleanly stopped at the user's
 request; its save, credentials and logs were preserved.
+
+## Generic depot direction and text-play guidance
+
+The Luna follow-up adds opt-in `direction: "auto"` to the existing road/rail
+depot actions, with the same command surface for text and capture players.
+The [placement contract](depot-placement.md) explains unique local facing,
+actual completed direction feedback and the remaining reciprocal-connection
+requirement. Independent architecture and correctness PRE reviews preceded code;
+separate POST reviews caught and corrected omitted safe-estimate error projection
+and response-schema fields. Strategic choices and evidence-freshness guidance
+remain in the [public player supplement](../tests/integration/luna_play/TEXT_PLAYER.md);
+no evidence notebook, inbox subsystem or business-policy API was added.
+
+The combined production native executable has SHA-256
+`eada3a7bbe726c1feeeba7f8bbc317d410841ea2176d1b91da1efa45eb013db1`,
+preserved at `/tmp/ottd-depot-native-freeze01/openttd`. The corresponding catalog
+BLAKE2b-256 is
+`4e9c1f52af5bd175cdc0a306356d7db378577ea2967c99356d44375e5d4fe89e`.
+The combined backend suite passed all 390 tests without skips, including the
+optional JSON Schema validation. Ten focused native cases passed 957 assertions:
+road/rail facings, exact type/category/access, slope/map edges, RNG/funds/map
+preservation during vanilla quotes, explicit-direction bypass, local dependency
+comparison, safe errors and actual direction result guards.
+The full combined native unit suite then passed 250 cases / 117,128 assertions,
+including the earlier capture work and the new fixture cleanup, at
+`/tmp/ottd-depot-capture-native-final.log`. The compiled test executable SHA-256
+is `d3135873fd66de262d74de483157e53899735e805cf9276ecc97b156458a75b9`.
+Source hashes and review/evidence paths are collected in
+`/tmp/ottd-depot-final-acceptance01/evidence.json`.
+
+On a fresh disposable 128-square world, the public text fixture passed in 10.2
+seconds using 150 HTTP requests, 27 map pages and 17 action submissions including
+one exact replay. All four road facings returned the expected actual integer
+direction. Intentionally missing reciprocal neighbor bits stayed unchanged;
+automatic facing built no connector. Unavailable/ambiguous actions and advisory
+quotes retained their safe errors without constructing a depot. Explicit isolated
+placement still worked. A completed action replay after adding a second neighbor
+retained its original result/tick rather than resolving again. Owned rail also
+worked. Evidence: `/tmp/ottd-depot-public-proof01/depot-direction-result.json`
+(SHA-256 `1c64fb2fdfc7889626398b6f62022ee610f6067ea3074b1cfa619f21727ec22a`).
+
+A separate visual company used MCP `act_and_observe` to construct one automatic
+road depot. Its completed receipt reported actual direction `1`, cost `390` and
+the created reference; the tool returned a native map image with causal state
+`satisfied`. The new depot is visible in the delivered PNG, SHA-256
+`304811f52812238d2411ec2b64ecc9050d1672d2387bc97605ca3122a589a8ef`.
+This was an operator-selected mechanical fixture, not an independently chosen
+Luna business. Evidence: `/tmp/ottd-depot-visual-compose01/result.json` and its
+adapter audit. All three disposable capture/depot test worlds were then stopped
+cleanly, preserving their saves and evidence.
+
+Reproduce the public depot fixture with one fresh text-company credential:
+
+```sh
+python tests/integration/depot_direction.py --origin "$QA_ORIGIN" \
+  --token-file "$QA_TOKEN_FILE" --artifacts /tmp/depot-direction-check
+```
+
+Native local-fence cases exercise capture/comparison directly; an entire queued
+bridge submission interrupted by a changed neighbor was not added to this gate.
+The unpaused public fixture does not prove funds/RNG/internal command-count
+invariance; those vanilla checks are separate native tests. Initial native
+fixture attempts exposed missing pool-allocation guards and an unregistered
+synthetic road category; only fixture setup changed to correct them. Their logs
+remain alongside the passing focused run
+`/tmp/ottd-depot-native-focused04.log`. The initial combined Python environment
+overlay selected an incompatible `typing_extensions`; the corrected run preserves
+the ASGI environment and appends optional schema dependencies, with its passing
+result at `/tmp/ottd-depot-capture-backend-with-schema.log`.
 
 ## Build and host
 

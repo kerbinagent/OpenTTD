@@ -450,6 +450,7 @@ Json FieldSchema(const Spec &spec, std::string_view key)
 	if (key == "airport_type") return IntegerSchema(0, NUM_AIRPORTS - 1);
 	if (key == "bridge_type") return IntegerSchema(0, MAX_BRIDGES - 1);
 	if (key == "layout") return IntegerSchema(0, 255);
+	if (key == "direction" && (name == "road.depot.build" || name == "rail.depot.build")) return {{"anyOf", Json::array({IntegerSchema(0, 3), EnumSchema({"auto"})})}};
 	if (key == "direction" || key == "direction_cycles") return IntegerSchema(0, 3);
 	if (key == "cargo_id") return IntegerSchema(0, NUM_CARGO - 1);
 	if (key == "position" || key == "target_position") return IntegerSchema(0, MAX_VEH_ORDER_ID);
@@ -1183,7 +1184,6 @@ static ActionResult DispatchActionImpl(const std::string &action, const Json &pa
 			auto one_way = p.Bool("one_way") ? DisallowedRoadDirections(DisallowedRoadDirection::Northbound) : DisallowedRoadDirections{};
 			return invocation.Post<Commands::BuildRoadLong>(end, start, road_type, axis, one_way, start > end, start <= end, true);
 		}
-		if (action == "road.depot.build") return invocation.Post<Commands::BuildRoadDepot>(p.Tile("tile"), p.Road(), p.Direction());
 		if (action == "road.stop.remove") return invocation.Post<Commands::RemoveRoadStop>(p.Tile("tile"), p.Int("width", 1, NATIVE_MAX_STATION_EXTENT, 1), p.Int("height", 1, NATIVE_MAX_STATION_EXTENT, 1), p.StopType(), p.Bool("remove_road"));
 
 		if (action == "rail.build") return invocation.Post<Commands::BuildRail>(p.Tile("tile"), p.Rail(), p.GetTrack(), false);
@@ -1195,7 +1195,6 @@ static ActionResult DispatchActionImpl(const std::string &action, const Json &pa
 			if (action == "rail.remove_line") return invocation.Post<Commands::RemoveRailLong>(end, start, p.GetTrack());
 			return invocation.Post<Commands::BuildRailLong>(end, start, p.Rail(), p.GetTrack(), false, true);
 		}
-		if (action == "rail.depot.build") return invocation.Post<Commands::BuildRailDepot>(p.Tile("tile"), p.Rail(), p.Direction());
 		if (action == "rail.station.remove" || action == "rail.waypoint.remove") {
 			auto start = p.Tile("start"), end = p.Tile("end");
 			BoundedArea(start, end);
@@ -1301,6 +1300,15 @@ Json EstimateAction(const std::string &action, const Json &parameters)
 		if (!CaptureActionTargets(action, parameters).is_array()) return unavailable("invalid_targets");
 		ActionInvocation invocation(ActionInvocation::Mode::Estimate);
 		const ActionResult prepared = DispatchActionImpl(action, parameters, invocation);
+		if ((action == "road.depot.build" || action == "rail.depot.build") && invocation.Calls() == 0 && prepared.prequeue_result &&
+				(prepared.code == "depot_direction_unavailable" || prepared.code == "depot_direction_ambiguous")) {
+			/* A failed auto selection has no native quote or created entity, but
+			 * preserves its bounded gameplay error in the normal estimate envelope. */
+			Json result = *prepared.prequeue_result;
+			result["advisory"] = true;
+			result["test_and_execute_may_differ"] = false; // Neither depot command has NoTest.
+			return {{"estimate", std::move(result)}};
+		}
 		if (invocation.Calls() != 1 || !invocation.GetEstimate() || prepared.code != "estimate_only") {
 			return unavailable(prepared.code == "estimate_unavailable" ? "estimate_unavailable" : "invalid_parameters");
 		}
@@ -1746,6 +1754,7 @@ Json CapabilityMatrix()
 		if (name == "sign.place") fields.push_back("sign_id");
 		if (name == "town.found") fields.push_back("town_id");
 		if (name == "road.depot.build" || name == "rail.depot.build" || name == "water.depot.build") fields.push_back("depot_id");
+		if (name == "road.depot.build" || name == "rail.depot.build") fields.push_back("direction");
 		if (name == "road.stop.build" || name == "road.waypoint.build" || name == "rail.station.build" || name == "rail.waypoint.build" ||
 				name == "water.dock.build" || name == "water.buoy.build" || name == "airport.build") fields.push_back("station_id");
 		if (name == "vehicle.build" || name == "vehicle.refit") { fields.push_back("capacity"); fields.push_back("mail_capacity"); fields.push_back("cargo_capacities"); }
@@ -1848,8 +1857,13 @@ Json FormatCommandResult(Commands command, const CommandCost &cost, const Comman
 		const std::string name = action.at("name").get<std::string>();
 		const TileIndex tile = Parameters(action.at("parameters")).Tile("tile");
 		if (name == "road.depot.build" || name == "rail.depot.build" || name == "water.depot.build") {
-			if (IsDepotTile(tile) && !IsHangarTile(tile) && IsTileOwner(tile, _current_company)) {
+			const bool expected_depot = (name == "road.depot.build" && command == Commands::BuildRoadDepot && IsRoadDepotTile(tile)) ||
+				(name == "rail.depot.build" && command == Commands::BuildRailDepot && IsRailDepotTile(tile)) ||
+				(name == "water.depot.build" && IsDepotTile(tile) && !IsHangarTile(tile));
+			if (expected_depot && IsTileOwner(tile, _current_company)) {
 				if (const Depot *depot = Depot::GetIfValid(GetDepotIndex(tile))) result["depot_id"] = Handle(depot);
+				if (name == "road.depot.build") result["direction"] = to_underlying(GetRoadDepotDirection(tile));
+				if (name == "rail.depot.build") result["direction"] = to_underlying(GetRailDepotDirection(tile));
 			}
 		} else if (name == "road.stop.build" || name == "road.waypoint.build" || name == "rail.station.build" || name == "rail.waypoint.build" ||
 				name == "water.dock.build" || name == "water.buoy.build" || name == "airport.build") {

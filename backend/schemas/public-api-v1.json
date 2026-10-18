@@ -472,7 +472,7 @@
         "error": {
           "type": "object",
           "properties": {
-            "code": {"const": "gameplay_rejected"},
+            "code": {"enum": ["gameplay_rejected", "depot_direction_unavailable", "depot_direction_ambiguous"]},
             "message": {"type": "string", "maxLength": 1024}
           },
           "required": ["code", "message"],
@@ -610,6 +610,11 @@
         },
         "depot_id": {
           "$ref": "#/$defs/handle"
+        },
+        "direction": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
         },
         "order_version": {
           "type": "string",

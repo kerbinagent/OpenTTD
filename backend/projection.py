@@ -19,7 +19,7 @@ _OUTCOME = {
     "success": bool, "cost": int, "error": _ERROR, "vehicle_id": _HANDLE,
     "group_id": _HANDLE, "sign_id": _HANDLE, "town_id": _HANDLE,
     "capacity": int, "mail_capacity": int, "cargo_capacities": [_CAPACITY],
-    "station_id": _HANDLE, "depot_id": _HANDLE,
+    "station_id": _HANDLE, "depot_id": _HANDLE, "direction": int,
     "order_version": str, "source_order_version": str, "page_version": str,
 }
 _VISUAL_OUTCOME = {key: shape for key, shape in _OUTCOME.items()
@@ -707,6 +707,11 @@ def outcome(value, spec=None, *, visual=False):
         result = positive(value, _fields(spec, vocabulary))
     else:
         result = positive(value, vocabulary if visual else spec or vocabulary)
+    if isinstance(result, dict) and "direction" in result:
+        # This is completed depot feedback, never a candidate or failed build.
+        if (result.get("success") is not True or
+                type(result["direction"]) is not int or not 0 <= result["direction"] <= 3):
+            result.pop("direction")
     if visual and isinstance(result, dict) and "error" in result:
         result["error"] = error(result["error"], visual=True)
     if visual and isinstance(result, dict):
@@ -787,8 +792,13 @@ def estimate(value):
     if not value["success"]:
         native_error = value["error"]
         if (not isinstance(native_error, dict) or
-                native_error.get("code") != "gameplay_rejected" or
+                not isinstance(native_error.get("code"), str) or
+                native_error["code"] not in ("gameplay_rejected",
+                    "depot_direction_unavailable", "depot_direction_ambiguous") or
                 not isinstance(native_error.get("message"), str)):
+            unavailable()
+        if (native_error["code"] != "gameplay_rejected" and
+                (value["cost"] != 0 or value["test_and_execute_may_differ"])):
             unavailable()
         try:
             message = _bounded_feedback(native_error["message"], 1024)
@@ -796,7 +806,7 @@ def estimate(value):
                 unavailable()
         except (TypeError, ValueError, UnicodeError):
             unavailable()
-        result["error"] = {"code": "gameplay_rejected", "message": message}
+        result["error"] = {"code": native_error["code"], "message": message}
     try:
         if len(dumps(result).encode("utf-8")) > 4096:
             unavailable()

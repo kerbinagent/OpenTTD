@@ -6,6 +6,11 @@ Use the public API for every world observation, gameplay action and conversation
 
 Both text and capture players can use the same 103 typed gameplay actions. Capture players examine the world through genuine PNGs, while choosing typed action parameters themselves; typed writes do not require an image ID or GUI clicks. Ordinary command success, charged cost, native errors and created references are permitted feedback. `/v1/control/reference` supplies one explicitly selected current actuator reference or opaque mutation token, without attributes or lists. Structured world readers remain text-only. Capture players may also use optional image-bound `ui.apply` gestures and normal view controls. Follow the public client instructions for reference/version handling and exact retries.
 
+Text players should also read the [text-play prompt supplement](TEXT_PLAYER.md).
+Capture players should use the [selected native-image guide](../../../docs/capture-controls.md)
+when their advertised capabilities support it; successful observation tools return
+images directly, and optional after-action views wait for the replica to catch up.
+
 Ordinary voluntary peer conversation may share plans, town names or coordinates. Treat it as another player's statement, which may be mistaken, rather than authoritative state. Do not set up an automatic structured-query relay or ask the operator to act as an oracle.
 
 Your assignment is selected from this table:

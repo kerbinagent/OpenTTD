@@ -11,16 +11,19 @@
 #include "actions_spatial.h"
 #include "../3rdparty/monocypher/monocypher.h"
 #include "../command_func.h"
+#include "../bridge_map.h"
 #include "../company_base.h"
 #include "../company_func.h"
 #include "../cargotype.h"
 #include "../depot_base.h"
 #include "../depot_cmd.h"
+#include "../depot_map.h"
 #include "../house.h"
 #include "../industry.h"
 #include "../industry_cmd.h"
 #include "../industrytype.h"
 #include "../misc/endian_buffer.hpp"
+#include "../map_func.h"
 #include "../newgrf_house.h"
 #include "../newgrf_industries.h"
 #include "../newgrf_object.h"
@@ -32,6 +35,7 @@
 #include "../object_map.h"
 #include "../core/random_func.hpp"
 #include "../rail_map.h"
+#include "../rail_cmd.h"
 #include "../road_cmd.h"
 #include "../road.h"
 #include "../road_map.h"
@@ -206,6 +210,103 @@ Json ConstructionRoadState(TileIndex tile)
 	return state;
 }
 
+/** Auto chooses only a facing; it neither adds a connector nor checks a route. */
+template <Commands Tcommand, typename Type>
+ActionResult ConstructionDepotBuild(const Json &parameters, const Parameters &p, Type type, ActionInvocation &invocation)
+{
+	const TileIndex tile = p.Tile("tile");
+	if (parameters.at("direction") != "auto") return invocation.Post<Tcommand>(tile, type, p.Direction());
+
+	DiagDirection selected = DiagDirection::Invalid;
+	unsigned candidates = 0;
+	for (DiagDirection direction : EnumRange(DiagDirection::End)) {
+		const TileIndex neighbour = AddTileIndexDiffCWrap(tile, TileIndexDiffCByDiagDir(direction));
+		if (neighbour == INVALID_TILE || !IsValidTile(neighbour)) continue;
+		if constexpr (Tcommand == Commands::BuildRoadDepot) {
+			const RoadTramType category = GetRoadTramType(type);
+			/* Public/town roads are ordinary road neighbours too. */
+			if (!IsNormalRoadTile(neighbour) || GetRoadType(neighbour, category) != type || !GetRoadBits(neighbour, category).Any()) continue;
+		} else {
+			static_assert(Tcommand == Commands::BuildRailDepot);
+			if (!IsPlainRailTile(neighbour) || !IsTileOwner(neighbour, _current_company) || GetRailType(neighbour) != type || !GetTrackBits(neighbour).Any()) continue;
+		}
+
+		/* Each candidate starts with identical random streams. Reuse the full
+		 * native Shift lifecycle, including its ordinary auxiliary PSA allowance. */
+		struct RestoreSeeds {
+			SavedRandomSeeds seeds;
+			RestoreSeeds() { SaveRandomSeeds(&this->seeds); }
+			~RestoreSeeds() { RestoreRandomSeeds(this->seeds); }
+		} restore_seeds;
+		if (NativeEstimateCommand<Tcommand>::Run(tile, type, direction).Failed()) continue;
+		selected = direction;
+		++candidates;
+	}
+	if (candidates != 1) {
+		const char *code = candidates == 0 ? "depot_direction_unavailable" : "depot_direction_ambiguous";
+		const char *message = candidates == 0 ? "No legal depot facing toward matching adjacent infrastructure; choose an explicit direction" :
+			"More than one legal depot facing toward matching adjacent infrastructure; choose an explicit direction";
+		return {false, message, code, Json{{"success", false}, {"cost", 0}, {"error", {{"code", code}, {"message", message}}}}};
+	}
+	/* Freeze one concrete native direction now. Queued validation only compares
+	 * the local snapshot; it never repeats selection or posts a connector. */
+	return invocation.Post<Tcommand>(tile, type, selected);
+}
+
+/** Read-only local auto-selection fence, also used immediately before execution. */
+Json ConstructionDepotTileState(TileIndex tile)
+{
+	Json state = {{"tile", tile == INVALID_TILE ? Json(nullptr) : Json(tile.base())}, {"valid", tile != INVALID_TILE && IsValidTile(tile)}};
+	if (!state.at("valid").get<bool>()) return state;
+	state["type"] = to_underlying(GetTileType(tile));
+	state["height"] = TileHeight(tile);
+	state["slope"] = to_underlying(GetTileSlope(tile));
+	state["owner"] = (IsTileType(tile, TileType::House) || IsTileType(tile, TileType::Industry)) ? Json(nullptr) : Json(GetTileOwner(tile).base());
+	state["bridge_above"] = IsBridgeAbove(tile);
+	if (IsBridgeAbove(tile)) {
+		state["bridge_axis"] = to_underlying(GetBridgeAxis(tile));
+		state["bridge_height"] = GetBridgeHeight(GetSouthernBridgeEnd(tile));
+	}
+	if (IsTileType(tile, TileType::Road)) {
+		state["road_kind"] = to_underlying(GetRoadTileType(tile));
+		state["road_type"] = to_underlying(GetRoadTypeRoad(tile));
+		state["tram_type"] = to_underlying(GetRoadTypeTram(tile));
+		state["road_owner"] = GetRoadOwner(tile, RoadTramType::Road).base();
+		state["tram_owner"] = GetRoadOwner(tile, RoadTramType::Tram).base();
+		if (IsNormalRoadTile(tile)) {
+			state["road_bits"] = GetRoadBits(tile, RoadTramType::Road).base();
+			state["tram_bits"] = GetRoadBits(tile, RoadTramType::Tram).base();
+			state["road_directions"] = GetDisallowedRoadDirections(tile).base();
+		}
+		if (IsRoadDepotTile(tile)) state["depot_direction"] = to_underlying(GetRoadDepotDirection(tile));
+		if (IsLevelCrossingTile(tile)) state["rail_type"] = to_underlying(GetRailType(tile));
+	} else if (IsTileType(tile, TileType::Railway)) {
+		state["rail_kind"] = to_underlying(GetRailTileType(tile));
+		state["rail_type"] = to_underlying(GetRailType(tile));
+		if (IsPlainRailTile(tile)) state["track_bits"] = GetTrackBits(tile).base();
+		if (IsRailDepotTile(tile)) state["depot_direction"] = to_underlying(GetRailDepotDirection(tile));
+	}
+	if (IsRoadDepotTile(tile) || IsRailDepotTile(tile)) state["depot"] = Handle(Depot::GetByTile(tile));
+	return state;
+}
+
+Json ConstructionDepotSelectionState(const std::string &action, const Parameters &p)
+{
+	const TileIndex tile = p.Tile("tile");
+	Json state = {{"build_on_slopes", _settings_game.construction.build_on_slopes}, {"tiles", Json::array({ConstructionDepotTileState(tile)})}};
+	if (action == "road.depot.build") {
+		const RoadType type = p.Road();
+		state["road_type"] = to_underlying(type);
+		state["road_category"] = to_underlying(GetRoadTramType(type));
+	} else {
+		state["rail_type"] = to_underlying(p.Rail());
+	}
+	for (DiagDirection direction : EnumRange(DiagDirection::End)) {
+		state["tiles"].push_back(ConstructionDepotTileState(AddTileIndexDiffCWrap(tile, TileIndexDiffCByDiagDir(direction))));
+	}
+	return state;
+}
+
 template <Commands Tcommand>
 auto ConstructionArguments(const CommandDataBuffer &data)
 {
@@ -340,6 +441,8 @@ std::optional<IndustryPlatformDependencies> CaptureIndustryPlatformDependencies(
 std::optional<ActionResult> DispatchConstructionAction(const std::string &action, const Json &parameters, ActionInvocation &invocation)
 {
 	Parameters p(parameters);
+	if (action == "road.depot.build") return ConstructionDepotBuild<Commands::BuildRoadDepot>(parameters, p, p.Road(), invocation);
+	if (action == "rail.depot.build") return ConstructionDepotBuild<Commands::BuildRailDepot>(parameters, p, p.Rail(), invocation);
 	if (action == "object.build") {
 		ConstructionObject(p);
 		return invocation.Post<Commands::BuildObject>(p.Tile("tile"), ObjectType(p.Int("object_type", 0, NUM_OBJECTS - 1)), static_cast<uint8_t>(p.Int("view", 0, 255, 0)));
@@ -414,7 +517,9 @@ std::optional<Json> CaptureConstructionTargets(const std::string &action, const 
 {
 	Parameters p(parameters);
 	Json state = Json::object();
-	if (action == "object.build") {
+	if ((action == "road.depot.build" || action == "rail.depot.build") && parameters.at("direction") == "auto") {
+		state = ConstructionDepotSelectionState(action, p);
+	} else if (action == "object.build") {
 		const auto *spec = ConstructionObject(p);
 		state = {{"type", p.Int("object_type", 0, NUM_OBJECTS - 1)}, {"size", spec->size}, {"views", spec->views}};
 		if (p.Int("object_type", 0, NUM_OBJECTS - 1) == OBJECT_HQ) state["hq"] = ConstructionHQState();
