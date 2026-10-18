@@ -119,6 +119,10 @@ def main(argv: list[str] | None = None) -> int:
                        help="minimum seconds between captures per renderer run (1 to 60)")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8080)
+    profiles = commands.add_parser("profiles", help="serve model metadata for an existing running world")
+    profiles.add_argument("--database", required=True)
+    profiles.add_argument("--world", required=True)
+    profiles.add_argument("--port", type=_bounded_decimal("port", 1, 65535), default=8081)
     provision = commands.add_parser("provision", help="create one scoped run credential")
     provision.add_argument("--database", required=True)
     provision.add_argument("--world", required=True)
@@ -130,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
     provision.add_argument("--epoch", default="initial")
     provision.add_argument("--token-file", help="new private file for the one-time credential")
     args = parser.parse_args(argv)
+    if args.command == "profiles" and not Path(args.database).is_file():
+        parser.error("--database must name the existing world's database")
     if args.command == "serve":
         renderer_options = (args.renderer_socket, args.renderer_run, args.renderer_artifacts)
         if args.renderer_config and any(renderer_options):
@@ -181,6 +187,24 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Credential written to {args.token_file}", file=sys.stderr)
             else:
                 print(token)
+            return 0
+
+        if args.command == "profiles":
+            from .service import Service
+            from .profiles import create_app
+            import uvicorn
+
+            service = Service(store, None, autostart=False, world_id=args.world)
+            try:
+                print("Serving metadata only on loopback; existing game broker is unchanged.", file=sys.stderr)
+                uvicorn.run(
+                    create_app(service), host="127.0.0.1", port=args.port,
+                    workers=1, loop="asyncio", http="h11", limit_concurrency=128,
+                    timeout_keep_alive=5, timeout_graceful_shutdown=15,
+                    proxy_headers=False, access_log=False, log_level="warning",
+                )
+            finally:
+                service.close()
             return 0
 
         from .bridge import UnixEngine

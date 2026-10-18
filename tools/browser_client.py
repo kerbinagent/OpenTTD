@@ -8,13 +8,16 @@ import os
 from pathlib import Path
 import stat
 
-from aiohttp import WSMsgType, web
+from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, WSMsgType, web
 
 ASSETS = {'openttd.html', 'openttd.js', 'openttd.wasm', 'openttd.data'}
 CLIENT_LIMIT = 4
 MESSAGE_LIMIT = 256 * 1024
 CHUNK_SIZE = 32 * 1024
 WRITE_TIMEOUT = 10
+METADATA_LIMIT = 64 * 1024
+METADATA_TIMEOUT = 3
+METADATA_SESSION = web.AppKey('metadata_session', ClientSession)
 
 
 def port_number(value):
@@ -55,7 +58,50 @@ async def bridge(ws, reader, writer):
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def create_app(asset_dir, port=18087, native_port=3979):
+def read_metadata_token(path):
+    with Path(path).open('rb') as source:
+        value = source.read(4097)
+    token = value[:-1] if value.endswith(b'\n') else value
+    token = token[:-1] if token.endswith(b'\r') else token
+    if len(value) > 4096 or not token or any(byte <= 32 or byte >= 127 for byte in token):
+        raise ValueError('metadata credential must be a bounded single-line token')
+    return token.decode('ascii')
+
+
+def model_roster(payload):
+    """Public display labels only: no identities, run handles or credentials."""
+    people = payload.get('participants') if isinstance(payload, dict) else None
+    if not isinstance(people, list) or len(people) > 100:
+        raise ValueError('invalid participant list')
+    result = []
+    for person in people:
+        if not isinstance(person, dict):
+            raise ValueError('invalid participant')
+        company = person.get('company_id')
+        name, kind = person.get('display_name'), person.get('kind')
+        valid_company = company is None or (type(company) is int and company in (*range(15), 255))
+        if not valid_company or not isinstance(name, str) or not 1 <= len(name) <= 200 or not isinstance(kind, str) or kind not in {'agent', 'human'}:
+            raise ValueError('invalid participant labels')
+        row = {'company_id': company, 'display_name': name, 'kind': kind}
+        report = person.get('model_report')
+        if kind == 'agent' and report is not None:
+            if not isinstance(report, dict) or report.get('self_reported') is not True:
+                raise ValueError('invalid model report')
+            clean = {}
+            for field, maximum in [('model_name', 100), ('effort_level', 32)]:
+                label = report.get(field)
+                if not isinstance(label, str) or not 1 <= len(label) <= maximum or label != label.strip() or not label.isprintable():
+                    raise ValueError('invalid model report label')
+                clean[field] = label
+            row['model_report'] = {**clean, 'self_reported': True}
+        result.append(row)
+    return {'participants': result}
+
+
+def create_app(asset_dir, port=18087, native_port=3979, metadata_port=None, metadata_token_file=None):
+    if (metadata_port is None) != (metadata_token_file is None):
+        raise ValueError('metadata port and token file must be provided together')
+    metadata_token = read_metadata_token(metadata_token_file) if metadata_port is not None else None
     root = Path(asset_dir).resolve(strict=True)
     if not root.is_dir():
         raise ValueError('asset directory required')
@@ -72,7 +118,10 @@ def create_app(asset_dir, port=18087, native_port=3979):
     async def guard(request, handler):
         if request.headers.getall('Host', []) not in ([host] for host in hosts):
             raise web.HTTPForbidden()
-        if request.query_string or '%' in request.raw_path or request.path not in {'/', '/browser-config.js', '/native'} | {'/' + name for name in ASSETS}:
+        routes = {'/', '/browser-config.js', '/native'} | {'/' + name for name in ASSETS}
+        if metadata_port is not None:
+            routes.add('/model-roster')
+        if request.query_string or '%' in request.raw_path or request.path not in routes:
             raise web.HTTPNotFound()
         if request.method not in {'GET', 'HEAD'}:
             raise web.HTTPMethodNotAllowed(request.method, ['GET', 'HEAD'])
@@ -83,7 +132,7 @@ def create_app(asset_dir, port=18087, native_port=3979):
         if request.path == '/':
             raise web.HTTPFound('/openttd.html')
         if request.path == '/browser-config.js':
-            config = {'nativePort': native_port, 'company': 1, 'websocketPath': '/native'}
+            config = {'nativePort': native_port, 'company': 1, 'websocketPath': '/native', 'modelRoster': metadata_port is not None}
             return web.Response(text='window.OPENTTD_BROWSER_RELAY=' + json.dumps(config) + ';\n', content_type='application/javascript')
         name = request.path[1:]
         # Open without following a replacement symlink; retain the descriptor
@@ -145,6 +194,30 @@ def create_app(asset_dir, port=18087, native_port=3979):
                 active.discard(ws)
         return ws
 
+    async def metadata(request):
+        try:
+            async with app[METADATA_SESSION].get(
+                f'http://127.0.0.1:{metadata_port}/v1/participants',
+                headers={'Authorization': 'Bearer ' + metadata_token}, allow_redirects=False,
+            ) as response:
+                if response.status != 200:
+                    raise ValueError('metadata unavailable')
+                body = bytearray()
+                async for chunk in response.content.iter_chunked(CHUNK_SIZE):
+                    body.extend(chunk)
+                    if len(body) > METADATA_LIMIT:
+                        raise ValueError('metadata too large')
+                payload = model_roster(json.loads(body))
+        except (ClientError, TimeoutError, ValueError, UnicodeError):
+            raise web.HTTPServiceUnavailable(text='Model reports unavailable')
+        return web.json_response(payload)
+
+    async def metadata_session(app):
+        async with ClientSession(timeout=ClientTimeout(total=METADATA_TIMEOUT),
+                                 connector=TCPConnector(limit=2), trust_env=False) as session:
+            app[METADATA_SESSION] = session
+            yield
+
     async def headers(request, response):
         response.headers.update({'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer'})
 
@@ -154,6 +227,9 @@ def create_app(asset_dir, port=18087, native_port=3979):
     app = web.Application(middlewares=[guard], client_max_size=1024)
     app.on_response_prepare.append(headers)
     app.on_shutdown.append(shutdown)
+    if metadata_port is not None:
+        app.cleanup_ctx.append(metadata_session)
+        app.router.add_route('*', '/model-roster', metadata)
     app.router.add_route('*', '/native', native)
     app.router.add_route('*', '/{path:.*}', serve)
     return app
@@ -164,8 +240,12 @@ def main():
     parser.add_argument('asset_dir', type=Path, help='public isolated WASM build directory')
     parser.add_argument('--port', type=port_number, default=18087)
     parser.add_argument('--native-port', type=port_number, default=3979)
+    parser.add_argument('--metadata-port', type=port_number, help='fixed loopback API port for public model labels')
+    parser.add_argument('--metadata-token-file', type=Path, help='server-held API credential; requires --metadata-port')
     args = parser.parse_args()
-    web.run_app(create_app(args.asset_dir, args.port, args.native_port), host='127.0.0.1', port=args.port, access_log=None, shutdown_timeout=5, max_line_size=4096, max_field_size=4096)
+    if (args.metadata_port is None) != (args.metadata_token_file is None):
+        parser.error('--metadata-port and --metadata-token-file must be provided together')
+    web.run_app(create_app(args.asset_dir, args.port, args.native_port, args.metadata_port, args.metadata_token_file), host='127.0.0.1', port=args.port, access_log=None, shutdown_timeout=5, max_line_size=4096, max_field_size=4096)
 
 
 if __name__ == '__main__':

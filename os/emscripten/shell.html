@@ -87,6 +87,24 @@
         /* OpenTTD draws the cursor itself */
         cursor: none !important;
       }
+      #agents {
+        position: fixed;
+        right: 8px;
+        bottom: 104px;
+        z-index: 4;
+        max-width: min(400px, calc(100vw - 32px));
+        max-height: 60vh;
+        overflow: auto;
+        color: #fff;
+        background: #26313e;
+        border: 1px solid #abb8c5;
+        border-radius: 4px;
+        padding: 8px;
+      }
+      #agents summary { cursor: pointer; }
+      #agents-status { font-size: 12px; margin: 8px 0; }
+      #agents-list { margin: 0; padding-left: 20px; }
+      #agents-list li { margin: 8px 0; overflow-wrap: anywhere; }
     </style>
   </head>
   <body>
@@ -109,7 +127,66 @@
     </div>
 
     <button id="fullscreen" style="position:fixed;right:8px;bottom:64px;z-index:4">Fullscreen</button>
+    <details id="agents" hidden>
+      <summary>Agents</summary>
+      <p id="agents-status" role="status" aria-live="polite">Open to load model reports.</p>
+      <ul id="agents-list" aria-label="Agent model reports"></ul>
+    </details>
     <script src="/browser-config.js"></script>
+    <script id="model-roster-script">
+      (function() {
+        var panel = document.getElementById('agents');
+        if (!window.OPENTTD_BROWSER_RELAY || !window.OPENTTD_BROWSER_RELAY.modelRoster) return;
+        var list = document.getElementById('agents-list');
+        var status = document.getElementById('agents-status');
+        var timer, busy = false;
+        panel.hidden = false;
+        async function refresh() {
+          if (!panel.open || busy) return;
+          busy = true;
+          clearTimeout(timer);
+          var controller = new AbortController();
+          var timeout = setTimeout(function() { controller.abort(); }, 3000);
+          try {
+            var response = await fetch('/model-roster', { signal: controller.signal, cache: 'no-store' });
+            if (!response.ok) throw new Error('Model reports unavailable');
+            var page = await response.json();
+            if (!Array.isArray(page.participants)) throw new Error('Invalid model reports');
+            if (!panel.open) return;
+            var rows = page.participants.filter(function(person) { return person.kind === 'agent'; }).slice(0, 100).map(function(person) {
+              var item = document.createElement('li');
+              var company = person.company_id === null || person.company_id === 255 ? 'Spectator' : 'Company #' + (person.company_id + 1);
+              var report = person.model_report;
+              item.textContent = company + ' · ' + person.display_name + ' — ' + (report
+                ? 'Model: ' + report.model_name + ' · Effort: ' + report.effort_level + ' (self-reported)'
+                : 'Model not reported');
+              return item;
+            });
+            list.replaceChildren.apply(list, rows);
+            status.textContent = rows.length ? 'Model and effort labels are self-reported by each agent.' : 'No agents listed.';
+          } catch (error) {
+            if (panel.open) {
+              list.replaceChildren();
+              status.textContent = 'Model reports unavailable. Retrying while this panel is open.';
+            }
+          } finally {
+            clearTimeout(timeout);
+            busy = false;
+            if (panel.open) timer = setTimeout(refresh, 15000);
+          }
+        }
+        panel.addEventListener('toggle', function() {
+          clearTimeout(timer);
+          if (panel.open) {
+            if (!list.children.length) status.textContent = 'Loading model reports…';
+            void refresh();
+          } else {
+            list.replaceChildren();
+            status.textContent = 'Open to load model reports.';
+          }
+        });
+      })();
+    </script>
     <script type='text/javascript'>
       var statusElement = document.getElementById('status');
       var progressElement = document.getElementById('progress');

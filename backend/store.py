@@ -106,6 +106,11 @@ class Store:
                         REFERENCES memberships(world_id, identity_id, company_id)
                 );
                 CREATE INDEX IF NOT EXISTS runs_world ON runs(world_id, active);
+                CREATE TABLE IF NOT EXISTS run_model_reports (
+                    run_id TEXT PRIMARY KEY REFERENCES runs(id),
+                    model_name TEXT NOT NULL,
+                    effort_level TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS credentials (
                     token_hash TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL UNIQUE REFERENCES runs(id)
@@ -393,6 +398,41 @@ class Store:
         return [self._principal(row) for row in rows]
 
     principals_for_world = active_principals_for_world
+
+    def set_model_report(self, principal: Principal, report: dict[str, str] | None) -> dict[str, Any] | None:
+        """Replace this agent run's public, unverified model description."""
+        self._ensure_world(principal.world_id)
+        with self._transaction() as db:
+            self.validate_principal(principal)
+            if principal.kind != "agent" or principal.mode not in ("text", "visual"):
+                raise ServiceError("forbidden", "Only agent runs can report model metadata", 403)
+            if report is None:
+                db.execute("DELETE FROM run_model_reports WHERE run_id=?", (principal.run_id,))
+                return None
+            if not isinstance(report, dict) or set(report) != {"model_name", "effort_level"}:
+                raise ServiceError("invalid_request")
+            for name, maximum in (("model_name", 100), ("effort_level", 32)):
+                value = report[name]
+                if (not isinstance(value, str) or not 1 <= len(value) <= maximum
+                        or value != value.strip() or not value.isprintable()):
+                    raise ServiceError("invalid_request", "Model metadata must be bounded, printable labels")
+            db.execute(
+                "INSERT INTO run_model_reports(run_id,model_name,effort_level) VALUES (?,?,?) "
+                "ON CONFLICT(run_id) DO UPDATE SET model_name=excluded.model_name,effort_level=excluded.effort_level",
+                (principal.run_id, report["model_name"], report["effort_level"]),
+            )
+            return {**report, "self_reported": True}
+
+    def model_reports_for_world(self, world_id: str) -> dict[str, dict[str, Any]]:
+        """Public reports keyed by run; callers select their visible active runs."""
+        self._ensure_world(world_id)
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT m.* FROM run_model_reports m JOIN runs r ON r.id=m.run_id WHERE r.world_id=?",
+                (world_id,),
+            ).fetchall()
+        return {row["run_id"]: {"model_name": row["model_name"], "effort_level": row["effort_level"],
+                                "self_reported": True} for row in rows}
 
     def company_exists(self, world_id: str, company_id: int) -> bool:
         """Whether a company has ever been provisioned in this world."""

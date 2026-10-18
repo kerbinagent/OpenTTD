@@ -62,7 +62,25 @@ def on_event(event):
 
 ## Client workflows
 
+For an older backend that must remain running, the temporary metadata companion
+uses the same existing database, credentials and report implementation without
+opening an engine connection or starting another broker:
+
+```sh
+python3 -m backend profiles --database /var/lib/openttd/backend.sqlite3 \
+  --world world-1 --port 8081
+```
+
+This loopback listener permits only `GET /v1/me`, `GET /v1/participants`,
+`PUT /v1/me/model` and `DELETE /v1/me/model`; it has no game, static, image or
+event routes. Its roster omits native connections because it has no renderer
+provenance. Model reports use the ordinary API port after the next planned full
+backend upgrade. Before attaching the companion to an older deployment, verify
+startup on a database copy; it runs the canonical additive schema initialization.
+
 The operator supplies the origin, credential and version-matched [public envelopes](schemas/public-api-v1.json) and [engine catalog](schemas/engine-catalog-v1.json). The origin and credential alone are not a schema-discovery protocol: `/v1/capabilities` lists action availability but does not publish query names or parameter schemas. Its connection/availability fields use the last known engine handshake and configured renderer mapping; they are not live health guarantees. `/v1/me` resumes an already provisioned company/run and reports its fixed mode; request bodies cannot join another company or switch mode.
+
+An agent can publish its model and effort labels with `client.request("PUT", "/v1/me/model", {"model_name": "gpt-6-luna", "effort_level": "high"})`. Both text and visual agents may use this endpoint; human credentials cannot set model metadata. Both fields are required printable strings without surrounding whitespace, limited to 100 and 32 characters respectively. Model names and effort labels are provider-independent. The response is `{"model_report": {"model_name": "gpt-6-luna", "effort_level": "high", "self_reported": true}}`. This optional `model_report` also appears in `/v1/me` and the current run's `/v1/participants` entry. These are public self-reported labels, not verified model identity. They persist through reconnects, credential rotation and backend restarts, but a new run inherits nothing. `DELETE /v1/me/model` with no body clears the report and returns `{"model_report": null}`. Reporting metadata changes no company name, game state or permissions.
 
 For a text run, use POST observations when parameters contain object handles. The public row query `limit` is at most 100 even where the native catalog permits 256; `display.text` uses a byte limit of at most 2048. paginate pool queries with `next_after_id`, which may advance through an empty page. For an intentional loan increase, construct one request from the observed loan interval:
 

@@ -24,6 +24,7 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         self.connections = 0
         self.closed = 0
         self.writers = set()
+        self.metadata_server = None
 
         async def echo(reader, writer):
             self.connections += 1
@@ -52,6 +53,8 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.session.close()
         await self.server.close()
+        if self.metadata_server is not None:
+            await self.metadata_server.close()
         for writer in tuple(self.writers):
             writer.close()
         self.tcp.close()
@@ -60,6 +63,19 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
 
     async def connect(self, **kwargs):
         return await self.session.ws_connect(self.base + '/native', protocols=('binary',), headers=self.origin, **kwargs)
+
+    async def enable_metadata(self, handler, metadata_timeout=relay.METADATA_TIMEOUT):
+        upstream = aiohttp.web.Application()
+        upstream.router.add_get('/v1/participants', handler)
+        self.metadata_server = TestServer(upstream)
+        await self.metadata_server.start_server()
+        self.token_file = self.root / 'metadata.token'
+        self.token_file.write_text('test-secret-api-token\n')
+        await self.server.close()
+        with patch.object(relay, 'METADATA_TIMEOUT', metadata_timeout):
+            app = relay.create_app(self.root, self.port, 1, self.metadata_server.port, self.token_file)
+            self.server = TestServer(app, port=self.port)
+            await self.server.start_server()
 
     async def wait_closed_count(self, count):
         async with asyncio.timeout(2):
@@ -86,6 +102,85 @@ class RelayTests(unittest.IsolatedAsyncioTestCase):
         async with self.session.get(self.base + '/openttd.js') as response:
             self.assertEqual(response.status, 404)
         self.assertEqual(self.connections, 0)
+
+    async def test_metadata_is_opt_in_and_credential_options_are_paired(self):
+        async with self.session.get(self.base + '/model-roster') as response:
+            self.assertEqual(response.status, 404)
+        for options in [{'metadata_port': 18086}, {'metadata_token_file': self.root / 'token'}]:
+            with self.assertRaises(ValueError):
+                relay.create_app(self.root, **options)
+        token_file = self.root / 'token'
+        for value in [b'', b'x\nInjected: bad', b'x\n\n', b'x' * 4097, b'non ascii\xff']:
+            token_file.write_bytes(value)
+            with self.assertRaises(ValueError):
+                relay.create_app(self.root, metadata_port=18086, metadata_token_file=token_file)
+
+    async def test_metadata_projection_keeps_multiple_actors_but_no_private_fields(self):
+        calls = []
+        report = {'model_name': '<img src=x onerror=alert(1)>', 'effort_level': 'custom high', 'self_reported': True}
+        people = [
+            {'company_id': 1, 'display_name': '<b>Agent A</b>', 'kind': 'agent',
+             'model_report': {**report, 'token': 'nested-secret'}, 'identity_id': 'private-id',
+             'run_id': 'private-run', 'native_handle': {'private': True}},
+            {'company_id': 1, 'display_name': 'Agent B', 'kind': 'agent'},
+            {'company_id': 0, 'display_name': 'Human', 'kind': 'human', 'model_report': report},
+            {'company_id': None, 'display_name': 'Spectator', 'kind': 'human'},
+        ]
+        async def participants(request):
+            calls.append((request.path_qs, request.headers.get('Authorization')))
+            return aiohttp.web.json_response({'participants': people, 'token': 'top-secret'})
+        await self.enable_metadata(participants)
+        async with self.session.get(self.base + '/browser-config.js') as response:
+            config = await response.text()
+            self.assertIn('"modelRoster": true', config)
+            self.assertNotIn('secret', config)
+            self.assertNotIn(str(self.metadata_server.port), config)
+        async with self.session.get(self.base + '/model-roster') as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers['Cache-Control'], 'no-store')
+            payload = await response.json()
+        self.assertEqual(payload, {'participants': [
+            {'company_id': 1, 'display_name': '<b>Agent A</b>', 'kind': 'agent', 'model_report': report},
+            {'company_id': 1, 'display_name': 'Agent B', 'kind': 'agent'},
+            {'company_id': 0, 'display_name': 'Human', 'kind': 'human'},
+            {'company_id': None, 'display_name': 'Spectator', 'kind': 'human'},
+        ]})
+        self.assertEqual(calls, [('/v1/participants', 'Bearer test-secret-api-token')])
+        for path in ['/model-roster?port=1', '/model-roster/other', '/model-roster%2Fother']:
+            async with self.session.get(self.base + path) as response:
+                self.assertEqual(response.status, 404)
+        async with self.session.put(self.base + '/model-roster') as response:
+            self.assertEqual(response.status, 405)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.connections, 0)
+
+    async def test_metadata_redirect_oversize_and_malformed_responses_are_unavailable(self):
+        result = {'response': aiohttp.web.Response(status=302, headers={'Location': 'http://127.0.0.1:1/secret'})}
+        calls = []
+        async def participants(request):
+            calls.append(request.path_qs)
+            return result['response']
+        await self.enable_metadata(participants)
+        responses = [result['response'], aiohttp.web.Response(text='x' * (relay.METADATA_LIMIT + 1)),
+                     aiohttp.web.Response(text='{not json'), aiohttp.web.json_response({'participants': [None]}),
+                     aiohttp.web.json_response({'participants': [{'company_id': 1, 'display_name': 'A', 'kind': []}]}),
+                     aiohttp.web.json_response({'participants': [{'company_id': 1, 'display_name': 'A', 'kind': 'agent',
+                                                                 'model_report': {'model_name': 'bad\nlabel', 'effort_level': 'high', 'self_reported': True}}]})]
+        for upstream_response in responses:
+            result['response'] = upstream_response
+            async with self.session.get(self.base + '/model-roster') as response:
+                self.assertEqual(response.status, 503)
+                self.assertEqual(await response.text(), 'Model reports unavailable')
+        self.assertEqual(len(calls), len(responses))
+
+    async def test_metadata_timeout_is_bounded(self):
+        async def participants(request):
+            await asyncio.sleep(.2)
+            return aiohttp.web.json_response({'participants': []})
+        await self.enable_metadata(participants, metadata_timeout=.02)
+        async with asyncio.timeout(.15):
+            async with self.session.get(self.base + '/model-roster') as response:
+                self.assertEqual(response.status, 503)
 
     async def test_handshake_rejected_before_tcp(self):
         for headers, protocols, path in [({'Origin': 'http://evil.invalid'}, ('binary',), '/native'), (self.origin, (), '/native'), (self.origin, ('binary',), '/native?port=80'), ({}, ('binary',), '/native')]:

@@ -31,7 +31,10 @@ keeps it in tab memory only; it never places credentials in URLs or storage.
   continue while the native world is recovering.
 - `GET /v1/participants` returns `{participants: [...]}` with safe labels:
   `identity_id`, `display_name`, `kind`, `company_id`, optional `company_name` and
-  `presence`. It does not carry structured game observations.
+  `presence`. Agents may also have optional `model_report` labels with
+  `model_name`, `effort_level` and `self_reported: true`. The player list displays
+  these as self-reported text, or "Model not reported" when absent. It does not
+  carry structured game observations.
 - `POST /v1/view/images` with `{}` returns `{image_id, width, height}`.
   `GET /v1/images/{image_id}` returns the corresponding authorized PNG. The
   browser fetches its bytes before making a temporary object URL.

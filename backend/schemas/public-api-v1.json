@@ -915,6 +915,35 @@
       ],
       "additionalProperties": false
     },
+    "modelReportRequest": {
+      "type": "object",
+      "description": "PUT /v1/me/model replaces the authenticated agent run's self-reported model and effort labels. Both text and visual agents may report. Labels must be printable, have no leading/trailing whitespace, and contain no control or formatting characters. No provider-specific effort enum is imposed. DELETE /v1/me/model with no body clears the report.",
+      "properties": {
+        "model_name": {"type": "string", "minLength": 1, "maxLength": 100},
+        "effort_level": {"type": "string", "minLength": 1, "maxLength": 32}
+      },
+      "required": ["model_name", "effort_level"],
+      "additionalProperties": false
+    },
+    "modelReport": {
+      "type": "object",
+      "description": "Public, unverified model metadata for one run. It confers no identity or permission and is not inherited by a new run.",
+      "properties": {
+        "model_name": {"type": "string", "minLength": 1, "maxLength": 100},
+        "effort_level": {"type": "string", "minLength": 1, "maxLength": 32},
+        "self_reported": {"const": true}
+      },
+      "required": ["model_name", "effort_level", "self_reported"],
+      "additionalProperties": false
+    },
+    "modelReportResponse": {
+      "type": "object",
+      "properties": {
+        "model_report": {"anyOf": [{"$ref": "#/$defs/modelReport"}, {"type": "null"}]}
+      },
+      "required": ["model_report"],
+      "additionalProperties": false
+    },
     "meResponse": {
       "type": "object",
       "properties": {
@@ -941,6 +970,9 @@
         },
         "display_name": {
           "type": "string"
+        },
+        "model_report": {
+          "$ref": "#/$defs/modelReport"
         }
       },
       "required": [
@@ -985,6 +1017,9 @@
         "native_handle": {
           "$ref": "#/$defs/handle",
           "description": "Both perception modes: a current active native human connection using its explicit network ClientID, obtained after fresh roster and managed-worker classification. Copy this complete value as company.participant.authorize.parameters.participant. Uncertain classification omits the handle."
+        },
+        "model_report": {
+          "$ref": "#/$defs/modelReport"
         }
       },
       "required": [

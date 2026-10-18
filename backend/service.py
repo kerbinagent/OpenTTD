@@ -123,6 +123,8 @@ class Service:
             self.start()
 
     def start(self):
+        if self.engine is None:
+            raise ValueError("A game engine is required to start the world broker")
         if self._thread is None:
             self._thread = threading.Thread(target=self._dispatch_loop, name="world-broker", daemon=True)
             self._thread.start()
@@ -364,9 +366,21 @@ class Service:
             raise ServiceError("not_found", status=404)
         route = parts[1:]
         if method == "GET" and route == ["me"]:
-            return 200, {"identity_id": principal.identity_id, "world_id": principal.world_id,
-                         "company_id": principal.company_id, "run_id": principal.run_id,
-                         "mode": principal.mode, "kind": principal.kind, "display_name": principal.display_name}
+            result = {"identity_id": principal.identity_id, "world_id": principal.world_id,
+                      "company_id": principal.company_id, "run_id": principal.run_id,
+                      "mode": principal.mode, "kind": principal.kind, "display_name": principal.display_name}
+            report = self.store.model_reports_for_world(principal.world_id).get(principal.run_id)
+            if report is not None:
+                result["model_report"] = report
+            return 200, result
+        if route == ["me", "model"] and method in ("PUT", "DELETE"):
+            if query:
+                raise ServiceError("invalid_request")
+            if method == "PUT":
+                _object(body, {"model_name", "effort_level"}, {"model_name", "effort_level"})
+            else:
+                _object(body, {})
+            return 200, {"model_report": self.store.set_model_report(principal, body if method == "PUT" else None)}
         if method == "GET" and route == ["world", "status"]:
             _object(body, {})
             if query:
@@ -379,7 +393,7 @@ class Service:
                          "pause": pause, "event_cursor": cursor}
         if method == "GET" and route == ["participants"]:
             visible_handles = {}
-            if principal.mode in ("text", "visual"):
+            if self.engine is not None and principal.mode in ("text", "visual"):
                 try:
                     hello = self._hello(principal, refresh=True)
                     native_rows, _ = self._fresh_native_humans(principal, hello)
@@ -395,15 +409,19 @@ class Service:
                     # outages, but never reuse an earlier access handle.
                     pass
             people = {}
+            model_reports = self.store.model_reports_for_world(principal.world_id)
             worker_memberships = self.social.native_memberships_for_keys(principal.world_id,
-                self.renderer.managed_native_worker_keys()) if self.renderer else set()
+                self.renderer.managed_native_worker_keys()) if self.renderer and self.engine is not None else set()
             for member in self.store.principals_for_world(principal.world_id):
-                if member.mode == "native" and (member.identity_id, member.company_id) in worker_memberships:
+                if member.mode == "native" and (self.engine is None or
+                        (member.identity_id, member.company_id) in worker_memberships):
                     continue
                 person = {
                     "identity_id": member.identity_id, "display_name": member.display_name,
                     "kind": member.kind, "company_id": None if member.company_id == 255 else member.company_id,
                     "presence": "online" if member.mode == "native" else "unknown"}
+                if member.run_id in model_reports:
+                    person["model_report"] = model_reports[member.run_id]
                 if principal.mode in ("text", "visual") and member.mode == "native":
                     handle = visible_handles.get((member.identity_id, member.company_id))
                     if handle is not None:

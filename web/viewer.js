@@ -582,6 +582,12 @@ async function refreshParticipants(epoch) {
       const company = element("div", "company-label");
       company.append(element("span", "company-mark"), element("span", "", companyLabel(person.company_id, person.company_name)));
       item.append(heading, company);
+      if (person.kind === "agent") {
+        const report = person.model_report;
+        const label = report?.self_reported === true && typeof report.model_name === "string" && typeof report.effort_level === "string"
+          ? `Self-reported model: ${report.model_name} · Effort: ${report.effort_level}` : "Model not reported";
+        item.append(element("div", "participant-meta", label));
+      }
       const presence = person.presence === "online" ? "Online" : person.presence === "offline" ? "Offline" : "Known participant";
       item.append(element("div", "participant-meta", `${presence} · ${String(person.identity_id || "").slice(-6)}`));
       const actions = element("div", "participant-actions");

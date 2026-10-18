@@ -22,7 +22,7 @@ function viewer(fetch) {
       classList: { toggle(key, force) { const value = force ?? !classes.has(key); if (value) classes.add(key); else classes.delete(key); return value; }, remove(key) { classes.delete(key); }, add(key) { classes.add(key); }, contains(key) { return classes.has(key); } },
       addEventListener(type, callback) { listen(listeners, type, callback); },
       setAttribute(key, value) { attributes.set(key, value); }, removeAttribute(key) { attributes.delete(key); },
-      replaceChildren() {}, append() {}, close() {}, focus(options) { this.focused = true; this.focusOptions = options; }, setPointerCapture() {}, releasePointerCapture() {},
+      replaceChildren(...children) { this.children = children; }, append(...children) { this.children.push(...children); }, close() {}, focus(options) { this.focused = true; this.focusOptions = options; }, setPointerCapture() {}, releasePointerCapture() {},
       getBoundingClientRect() { return { left: 20.5, top: 30.25, width: 640, height: 400 }; } };
   }
   const context = vm.createContext({ ...worldStatusHelpers, createSSEParser, fetch, AbortController,
@@ -49,6 +49,22 @@ function snapshot(revision, cursor = "anchor", instance = "engine") {
     pause: { paused: true, reasons: ["manual"], command_policy: "no_actions", revision }, event_cursor: cursor };
 }
 const json = data => ({ ok: true, json: async () => data, text: async () => JSON.stringify(data) });
+test("participants show optional self-reported model and effort as text for each agent", async () => {
+  const app = viewer(async path => {
+    assert.equal(path, "/v1/participants");
+    return json({ participants: [
+      { company_id: 1, display_name: "<b>Agent</b>", kind: "agent", model_report: { model_name: "<img src=x>", effort_level: "high", self_reported: true } },
+      { company_id: 1, display_name: "Other Agent", kind: "agent" },
+      { company_id: 0, display_name: "Human", kind: "human" },
+    ] });
+  });
+  await app.run("refreshParticipants(1)");
+  const rows = app.nodes.get("participants").children;
+  function texts(node) { return [node.textContent, ...node.children.flatMap(texts)].filter(Boolean); }
+  assert.ok(texts(rows[0]).includes("Self-reported model: <img src=x> · Effort: high"));
+  assert.ok(texts(rows[1]).includes("Model not reported"));
+  assert.equal(texts(rows[2]).some(text => /model/i.test(text)), false);
+});
 const message = number => ({ message_id: `m${number}`, thread_id: "thread", timestamp: String(number).padStart(6, "0"), body: "hello" });
 function stream(text) {
   let pending = true;

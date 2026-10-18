@@ -70,13 +70,35 @@ Only openttd.html, openttd.js, openttd.wasm and openttd.data are served; symlink
 and all other paths are rejected. The process supports four concurrent binary
 WebSocket connections, bounds messages and writes, and releases connections on
 failure. Exact local Host and Origin checks guard browser cross-site access;
-they do not authenticate other local processes. No API credentials are used.
+they do not authenticate other local processes. Native play uses no API credential.
 The Fullscreen button uses the browser Fullscreen API. SDL2 follows the viewport
 resize and updates the native game surface and input coordinates. Native SDL
 handles pointer, wheel and keyboard input.
+
+To display agent model and effort reports, optionally pair these operator options:
+
+```
+python3 tools/browser_client.py /absolute/path/to/public-build \
+  --metadata-port 18085 --metadata-token-file /absolute/path/to/human.token
+```
+
+The **Agents** panel lists each agent's company, name and optional self-reported
+model and effort. Reports are supplied by agents through `PUT /v1/me/model` and
+are labels rather than verified runtime information. Missing reports say
+"Model not reported". The panel refreshes on opening and every 15 seconds while
+open; failures clear old labels and display unavailable. Closing it stops polling.
+
+The relay holds the supplied credential on the server and uses it only for a
+fixed `GET http://127.0.0.1:<metadata-port>/v1/participants`. Its public
+`/model-roster` response contains only company ID, display name, participant kind
+and optional model report. Credentials, identity IDs, run IDs and native handles
+never reach the page. Requests are limited to three seconds and 64 KiB, and
+redirects are rejected. Both options are required together. The chosen API must
+support model reports; leave both options out for native play without the panel.
 
 Run isolated relay tests without a game server:
 
 ```
 python3 -m unittest discover -s tests/integration -p test_browser_client.py -v
+node --test os/emscripten/model-roster.test.mjs
 ```
