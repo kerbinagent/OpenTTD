@@ -163,6 +163,11 @@ class Service:
         registration = self.store.registration_for_run(principal.run_id)
         if registration is not None:
             DynamicAgentAdmission.verify_owner(principal, self, registration)
+        elif principal.kind == "agent" and principal.run_id in self.store.agent_join_claimed_runs(principal.world_id):
+            # Historical public claims also retain their original incarnation.
+            # An old claim that never acquired a native binding fails closed.
+            DynamicAgentAdmission._assert_owner(principal, self, self._hello(principal, refresh=True),
+                                                require_registration=False)
         return principal
 
     def _envelope(self, rpc_type, principal=None, **fields):

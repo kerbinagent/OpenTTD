@@ -210,8 +210,8 @@ class DynamicAgentAdmission:
         return {key: getattr(principal, key) for key in ("identity_id", "company_id", "run_id", "mode")}
 
     @staticmethod
-    def _assert_owner(principal, service, hello):
-        if hello.get("company_registration") != {"version": 1}:
+    def _assert_owner(principal, service, hello, *, require_registration=True):
+        if require_registration and hello.get("company_registration") != {"version": 1}:
             raise ServiceError("join_not_ready", status=503)
         if hello.get("recovery_required") is not False:
             raise ServiceError("world_recovering", status=503)

@@ -46,10 +46,12 @@ class RegistrationEngine(FakeEngine):
         self.attached = {}
         self.bare_roster = False
         self.owner_error = None
+        self.registration_capability = True
 
     def valid_hello_reply(self, world_id):
         reply = super().valid_hello_reply(world_id)
-        reply["result"]["company_registration"] = {"version": 1}
+        if self.registration_capability:
+            reply["result"]["company_registration"] = {"version": 1}
         return reply
 
     @staticmethod
@@ -857,6 +859,80 @@ class DynamicAdmissionTests(unittest.TestCase):
         self.assertEqual(self.store.max_request_sequence("world"), 3)
         self.assertEqual(self.engine.count("company.register"), 1)
         self.assertEqual(self.engine.count("action.submit"), 1)
+
+    def legacy_claim(self, *, bound):
+        token = self.store.provision("world", "legacy-public-agent", 2, mode="text", kind="agent")
+        principal = self.store.authenticate(token)
+        if bound:
+            self.engine.owners[2] = DynamicAgentAdmission._owner(principal)
+        self.store.claim_agent_join("world", "initial", hashlib.sha256(secrets.token_bytes(32)).hexdigest(),
+            "text", principal, hashlib.sha256(token.encode()).hexdigest(), "boot")
+        return token, principal
+
+    def test_claimed_legacy_owner_is_verified_without_admission_or_registration_capability(self):
+        token, principal = self.legacy_claim(bound=True)
+        self.service.admission = None
+        self.engine.registration_capability = False
+        _, me = self.service.handle("GET", "/v1/me", token)
+        expected = {"identity_id": principal.identity_id, "world_id": "world", "company_id": 2,
+                    "run_id": principal.run_id, "mode": "text", "kind": "agent",
+                    "display_name": principal.display_name}
+        self.assertEqual(me, expected)
+        self.assertIsNone(self.store.registration_for_run(principal.run_id))
+        self.assertEqual(self.engine.count("session.bind"), 1)
+        self.assertIs(self.engine.calls[-1]["owner_bound"], True)
+        self.assertEqual(self.engine.calls[-1]["actor"], DynamicAgentAdmission._owner(principal))
+        # ID reuse changes only native incarnation. The old durable claim and
+        # bearer still exist, so backend-only social routes need the same gate.
+        self.engine.owners[2] = dict(self.engine.owners[2], run_id="replacement-company-owner")
+        self.service._chat_ready = True
+        replacement = self.store.provision("world", "replacement-operator", 2)
+        _, thread = self.service.handle("POST", "/v1/threads", replacement, {"scope": "company"})
+        path = f"/v1/threads/{thread['id']}/messages"
+        self.service.handle("POST", path, replacement,
+            {"request_id": "replacement-secret", "body": "Private replacement company plans"})
+        self.assertEqual(len(self.service.handle("GET", path, replacement)[1]["messages"]), 1)
+        operations = [
+            lambda: self.service.handle("GET", "/v1/me", token),
+            lambda: self.service.handle("GET", "/v1/threads", token),
+            lambda: self.service.handle("POST", "/v1/threads", token, {"scope": "company"}),
+            lambda: self.service.handle("GET", path, token),
+            lambda: self.service.handle("POST", path, token, {"request_id": "spy", "body": "Spy"}),
+            lambda: self.service.events(token),
+            lambda: self.service.wait_for_events(token, timeout=0),
+            lambda: self.service.image(token, "replacement-private-image"),
+        ]
+        for operation in operations:
+            self.assert_code("company_unavailable", operation)
+        self.assertEqual(self.store.authenticate(token), principal)
+        self.assertEqual(self.engine.count("company.register"), 0)
+        self.assertEqual(self.engine.count("action.submit"), 0)
+
+    def test_claimed_legacy_without_native_anchor_fails_closed_without_implicit_binding(self):
+        token, principal = self.legacy_claim(bound=False)
+        self.service.admission = None
+        self.assertEqual(self.assert_code("company_unavailable", lambda:
+            self.service.handle("GET", "/v1/me", token)).status, 409)
+        self.assertFalse(self.engine.owners)
+        self.assertEqual(self.store.authenticate(token), principal)
+        binds = [call for call in self.engine.calls if call["type"] == "session.bind"]
+        self.assertEqual(len(binds), 1)
+        self.assertIs(binds[0]["owner_bound"], True)
+        self.assertEqual(self.engine.count("company.register"), 0)
+        self.assertEqual(self.engine.count("action.submit"), 0)
+        self.assertEqual(self.store.max_request_sequence("world"), 0)
+
+    def test_unclaimed_private_operator_credential_keeps_existing_authentication_behavior(self):
+        token = self.store.provision("world", "private-operator", 4, kind="agent")
+        principal = self.store.authenticate(token)
+        self.service.admission = None
+        self.engine.unavailable.add("world")
+        _, me = self.service.handle("GET", "/v1/me", token)
+        self.assertEqual(me["run_id"], principal.run_id)
+        self.assertNotIn("registration_id", me)
+        self.assertNotIn("world_epoch", me)
+        self.assertFalse(self.engine.calls)
+        self.assertNotIn(principal.run_id, self.store.agent_join_claimed_runs("world"))
 
 
 if __name__ == "__main__":
