@@ -192,6 +192,48 @@ whose manifest is SHA-256
 Operational readiness is recorded in `.worlds/overnight-browser-readiness.json`;
 the game and relay remain running independently of the browser.
 
+## Agent model reports
+
+Commit `a9fa600fda` adds authenticated `PUT /v1/me/model` with
+`model_name` and `effort_level`, plus `DELETE` to clear the report. Both agent
+perception modes may report. Labels belong to the authenticated run, survive
+credential rotation and restart, and are not inherited by a replacement run.
+The native browser's optional **Agents** panel and the reference viewer show
+them explicitly as self-reported. The browser relay projects only display
+fields and keeps its API credential on the server.
+
+Independent architecture reviews preceded implementation; separate correctness
+reviews passed. Validation passed 290 backend tests, 11 relay tests and 27
+JavaScript tests. A read-only backup of the overnight world's database was used
+to verify companion startup: all 22 preexisting tables retained identical
+contents, and only the three-column `run_model_reports` table was added.
+
+The ongoing overnight backend remains on port 18085. Its temporary metadata-only
+companion listens on 18086 using the same database and credentials, with no
+engine connection, renderer or broker. An outer route filter rejects gameplay,
+static, image and event routes. The main backend supports model reports on its
+ordinary API port after a planned upgrade. This feature does not change the
+separate gameplay acceptance results or earlier performance measurements.
+
+Finite Chromium checks exercised real authenticated report creation, update and
+deletion through the API, literal rendering of HTML-like labels, missing reports,
+and clearing old labels after an actual companion outage. A closed panel made
+no roster requests during the measured 16-second window. Initial keyboard
+activation failed because SDL consumed window keyboard events; commit
+`0c7883d3be` isolates keyboard events inside the panel. A fresh browser check
+confirmed Enter and Space toggle the native summary control. Fixture evidence:
+`/tmp/openttd-native-browser-qa-model01/evidence/report.json` (SHA-256
+`d28c0f3210d3bc90f0ce1934970d4497b42b27e053ccbe3f88d24d4ae5983a65`)
+and `evidence-v2/report.json` (SHA-256
+`d44c8b905e2bb5a5777f4da3cc87c59bc37a12ccb4edad37d16d1224b31e4419`).
+
+The final browser release manifest is SHA-256
+`21ffba4bebcc37ba756be4a2d25924f1997691dfdc6ff96af164b1c0fa6a5e26`.
+Its native JavaScript, WASM and graphics data match the preceding release byte
+for byte. The relay on `http://localhost:18087/` serves the new page and public
+display projection. Reload the page to see **Agents**; labels refresh every
+15 seconds while the panel is open.
+
 ## Checkpoint observations
 
 A read-only 104.7-second sample of the small permanent world observed 420 private checkpoint samples and 105 public tick reads, with no read errors or failed saves. Publication cadence was bracketed at 30.25–31.00 seconds. Three saves completed between polls, giving duration upper bounds of 253–289 milliseconds; their duration was not measured as zero. The peak saved-state age during that interval was bracketed at 30.699–30.942 simulated seconds. The normal tick duration is 27 milliseconds and observed speed was 1.000001 times normal. Evidence: `/tmp/openttd-checkpoint-local-01`.
